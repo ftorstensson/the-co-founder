@@ -1,0 +1,16 @@
+langchain==0.3.27
+langchain-google-vertexai==2.0.28
+langserve[all]==0.3.1
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+google-cloud-aiplatform==1.97.0
+google-cloud-firestore==2.19.0
+pydantic==2.9.2
+langgraph==0.2.20
+langgraph-checkpoint-firestore==0.1.7
+typing_extensions==4.12.2
+sse-starlette==1.8.2
+langchain-core==0.3.80
+langchain-text-splitters==0.3.11
+langsmith<0.5
+google-cloud-storage==2.19.0
