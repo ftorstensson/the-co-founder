@@ -1,7 +1,7 @@
 "use client";
 import { useState, useRef, useEffect, Suspense } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
-import { Send, Terminal, Loader2, User, Bot } from "lucide-react";
+import { Send, Loader2, User, Bot, Brain, Save } from "lucide-react";
 import { clsx } from "clsx";
 import { twMerge } from "tailwind-merge";
 import ProjectBoard from "../components/ProjectBoard";
@@ -17,16 +17,16 @@ function AgentInterface() {
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [isSnapshotting, setIsSnapshotting] = useState(false); // <--- NEW STATE
   const [threadId, setThreadId] = useState<string>("");
 
-  // FETCH HISTORY when threadId changes
   useEffect(() => {
     const idFromUrl = searchParams.get("threadId");
     if (idFromUrl) {
       setThreadId(idFromUrl);
       fetchHistory(idFromUrl);
     } else {
-      const newId = "web-client-" + Date.now();
+      const newId = "founder-" + Date.now();
       setThreadId(newId);
       router.replace(`?threadId=${newId}`);
       setMessages([]);
@@ -49,49 +49,123 @@ function AgentInterface() {
     router.push(`?threadId=${id}`);
   };
 
+  // --- NEW: SNAPSHOT FUNCTION ---
+  const handleSnapshot = async () => {
+    if (!threadId) return;
+    setIsSnapshotting(true);
+    const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+    try {
+        await fetch(`${API_BASE_URL}/agent/snapshot/${threadId}`, { method: "POST" });
+        // Optional: Trigger a toast or refresh
+    } catch (e) {
+        console.error("Snapshot failed", e);
+    } finally {
+        setIsSnapshotting(false);
+    }
+  };
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
 
-  const handleSubmit = async (e: React.FormEvent) => { e.preventDefault(); if (!input.trim() || isLoading) return; const userMessage = input.trim(); setInput(""); setMessages((prev) => [...prev, { role: "user", content: userMessage }]); setIsLoading(true);
+  const handleSubmit = async (e: React.FormEvent) => { 
+    e.preventDefault(); 
+    if (!input.trim() || isLoading) return; 
+    const userMessage = input.trim(); 
+    setInput(""); 
+    setMessages((prev) => [...prev, { role: "user", content: userMessage }]); 
+    setIsLoading(true);
+    
     const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
     try {
-      const response = await fetch(`${API_BASE_URL}/agent/invoke`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ input: { messages: [{ type: "human", content: userMessage }] }, config: { configurable: { thread_id: threadId } } }) });
+      const response = await fetch(`${API_BASE_URL}/agent/invoke`, { 
+        method: "POST", 
+        headers: { "Content-Type": "application/json" }, 
+        body: JSON.stringify({ 
+            input: { messages: [{ type: "human", content: userMessage }] }, 
+            config: { configurable: { thread_id: threadId } } 
+        }) 
+      });
       if (!response.ok) throw new Error("Network response");
       const data = await response.json();
       const lastMessage = data.output.messages[data.output.messages.length - 1];
       setMessages((prev) => [...prev, { role: "assistant", content: lastMessage.content }]);
-    } catch (error) { console.error("Error:", error); setMessages((prev) => [...prev, { role: "assistant", content: "Error: Failed to connect." }]); } finally { setIsLoading(false); }
+    } catch (error) { 
+      console.error("Error:", error); 
+      setMessages((prev) => [...prev, { role: "assistant", content: "Error: Failed to connect." }]); 
+    } finally { 
+      setIsLoading(false); 
+    }
   };
 
   if (!threadId) return null;
 
   return (
-    <div className="flex h-screen bg-neutral-950 text-neutral-200 font-mono overflow-hidden">
-      <div className="hidden lg:block">
+    <div className="flex h-screen bg-slate-50 text-slate-900 font-sans overflow-hidden">
+      <div className="hidden lg:block border-r border-slate-200 bg-white">
         <ProjectSidebar currentId={threadId} onSelect={switchThread} />
       </div>
-      <div className="flex-1 flex flex-col min-w-0 border-r border-neutral-800">
-        <header className="flex items-center p-4 border-b border-neutral-800 bg-neutral-900/50 backdrop-blur">
-          <Terminal className="w-5 h-5 mr-3 text-emerald-500" />
-          <h1 className="text-lg font-bold tracking-tight">VIBE CODER <span className="text-neutral-500">CONSOLE</span></h1>
+
+      <div className="flex-1 flex flex-col min-w-0 border-r border-slate-200 bg-slate-50">
+        {/* HEADER */}
+        <header className="flex items-center justify-between p-4 border-b border-slate-200 bg-white shadow-sm z-10">
+          <div className="flex items-center">
+            <Brain className="w-5 h-5 mr-3 text-emerald-600" />
+            <h1 className="text-lg font-bold tracking-tight text-slate-900">THE CO-FOUNDER <span className="text-slate-400 font-normal">CONSOLE</span></h1>
+          </div>
+          
+          {/* SNAPSHOT BUTTON */}
+          <button 
+            onClick={handleSnapshot}
+            disabled={isSnapshotting}
+            className={cn(
+                "flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors border",
+                isSnapshotting 
+                    ? "bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed" 
+                    : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50 hover:border-emerald-200 hover:text-emerald-600"
+            )}
+          >
+            {isSnapshotting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+            {isSnapshotting ? "Saving..." : "Snapshot"}
+          </button>
         </header>
-        <main className="flex-1 overflow-y-auto p-4 space-y-6">
-          {messages.length === 0 && <div className="flex flex-col items-center justify-center h-full text-neutral-500 opacity-50"><Bot className="w-10 h-10 mb-4" /><p>System Ready. Thread: {threadId.slice(-6)}</p></div>}
+
+        {/* CHAT */}
+        <main className="flex-1 overflow-y-auto p-4 space-y-6 bg-slate-50">
+          {messages.length === 0 && (
+            <div className="flex flex-col items-center justify-center h-full text-slate-400 opacity-80">
+              <div className="w-16 h-16 bg-white rounded-2xl shadow-sm flex items-center justify-center mb-4 border border-slate-200">
+                <Brain className="w-8 h-8 text-emerald-600" />
+              </div>
+              <p className="font-medium text-slate-600">Knowledge Engine Ready</p>
+              <p className="text-xs text-slate-400 mt-1">Session: {threadId.slice(-6)}</p>
+            </div>
+          )}
+          
           {messages.map((msg, i) => (
             <div key={i} className={cn("flex items-start max-w-2xl gap-3", msg.role === "user" ? "ml-auto justify-end" : "mr-auto justify-start")}>
-              {msg.role === "assistant" && <div className="w-8 h-8 rounded bg-emerald-500/10 flex items-center justify-center border border-emerald-500/20 shrink-0"><Bot className="w-4 h-4 text-emerald-500" /></div>}
-              <div className={cn("p-3 rounded text-sm leading-relaxed whitespace-pre-wrap", msg.role === "user" ? "bg-blue-900/20 border border-blue-500/20 text-blue-100" : "bg-neutral-900 border border-neutral-800 text-neutral-300")}>{msg.content}</div>
+              {msg.role === "assistant" && (
+                <div className="w-8 h-8 rounded-full bg-white flex items-center justify-center border border-slate-200 shadow-sm shrink-0 mt-1">
+                  <Bot className="w-4 h-4 text-emerald-600" />
+                </div>
+              )}
+              <div className={cn("p-4 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap shadow-sm", msg.role === "user" ? "bg-emerald-600 text-white rounded-tr-sm" : "bg-white border border-slate-200 text-slate-700 rounded-tl-sm")}>{msg.content}</div>
+              {msg.role === "user" && (<div className="w-8 h-8 rounded-full bg-slate-200 flex items-center justify-center border border-slate-300 shrink-0 mt-1"><User className="w-4 h-4 text-slate-500" /></div>)}
             </div>
           ))}
-          {isLoading && <div className="flex items-center gap-2 p-4 text-emerald-500/50"><Loader2 className="w-4 h-4 animate-spin" /><span className="text-xs uppercase">Processing...</span></div>}
+          {isLoading && (<div className="flex items-center gap-2 p-4 text-slate-400"><Loader2 className="w-4 h-4 animate-spin" /><span className="text-xs uppercase font-semibold tracking-wider">Thinking...</span></div>)}
           <div ref={messagesEndRef} />
         </main>
-        <div className="p-4 border-t border-neutral-800 bg-neutral-900/50">
-          <form onSubmit={handleSubmit} className="flex gap-2"><input value={input} onChange={(e) => setInput(e.target.value)} placeholder="Directive..." className="flex-1 bg-neutral-950 border border-neutral-800 rounded px-4 py-2 focus:outline-none focus:border-emerald-500/50" disabled={isLoading} /><button type="submit" aria-label="Send" disabled={isLoading || !input.trim()} className="px-4 bg-emerald-600 text-white rounded hover:bg-emerald-500 disabled:opacity-50"><Send className="w-4 h-4" /></button></form>
+
+        {/* INPUT */}
+        <div className="p-4 border-t border-slate-200 bg-white">
+          <form onSubmit={handleSubmit} className="flex gap-2 relative">
+            <input value={input} onChange={(e) => setInput(e.target.value)} placeholder="Dump your thoughts here..." className="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all text-slate-900 placeholder:text-slate-400" disabled={isLoading} />
+            <button type="submit" aria-label="Send" disabled={isLoading || !input.trim()} className="px-4 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 disabled:opacity-50 disabled:hover:bg-emerald-600 transition-colors shadow-sm"><Send className="w-4 h-4" /></button>
+          </form>
         </div>
       </div>
-      <div className="w-[350px] hidden md:block">
-        <ProjectBoard threadId={threadId} />
+      <div className="w-[400px] hidden md:block border-l border-slate-200 bg-white">
+        <ProjectBoard threadId={threadId} title="KNOWLEDGE BASE" />
       </div>
     </div>
   );
@@ -99,7 +173,7 @@ function AgentInterface() {
 
 export default function Home() {
   return (
-    <Suspense fallback={<div className="bg-neutral-950 h-screen w-screen" />}>
+    <Suspense fallback={<div className="bg-slate-50 h-screen w-screen" />}>
       <AgentInterface />
     </Suspense>
   );

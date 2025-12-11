@@ -1,46 +1,127 @@
 "use client";
 import { useEffect, useState } from "react";
-import { LayoutDashboard, Circle, Download, Loader2 } from "lucide-react";
 import { doc, onSnapshot } from "firebase/firestore";
 import { db } from "@/lib/firebase";
+import { Download, Layout, FileText, CheckCircle2, Circle, Clock } from "lucide-react";
 
-export default function ProjectBoard({ threadId }: { threadId: string }) {
+interface ProjectBoardProps {
+  threadId: string;
+  title?: string;
+}
+
+export default function ProjectBoard({ threadId, title = "PROJECT BOARD" }: ProjectBoardProps) {
   const [data, setData] = useState<any>(null);
-  const [loading, setLoading] = useState(true);
-  useEffect(() => { if (!threadId) return; const unsub = onSnapshot(doc(db, "project_boards", threadId), (doc) => { if (doc.exists()) setData(doc.data()); else setData(null); setLoading(false); }); return () => unsub(); }, [threadId]);
 
-  const handleDownload = () => { const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"; window.open(`${API_BASE_URL}/agent/download/${threadId}`, "_blank"); };
+  useEffect(() => {
+    if (!threadId) return;
+    
+    // ISOLATION: Listening to 'cofounder_boards' instead of 'project_boards'
+    const unsub = onSnapshot(doc(db, "cofounder_boards", threadId), (doc) => {
+      if (doc.exists()) {
+        setData(doc.data());
+      }
+    });
+    return () => unsub();
+  }, [threadId]);
 
-  if (loading) return <div className="h-full flex items-center justify-center text-neutral-600"><Loader2 className="w-6 h-6 animate-spin" /></div>;
+  const handleDownload = () => {
+    const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+    window.location.href = `${API_BASE_URL}/agent/download/${threadId}`;
+  };
 
-  const phase = data?.phase || "Discovery";
-  const status = data?.status || "Waiting for mission brief...";
-  const tasks = data?.tasks || [];
+  if (!data) {
+    return (
+      <div className="h-full flex flex-col items-center justify-center text-slate-400 space-y-4 p-8 text-center">
+        <Layout className="w-12 h-12 opacity-20" />
+        <p className="text-sm">Waiting for The Co-Founder to initialize the Knowledge Base...</p>
+      </div>
+    );
+  }
 
   return (
-    <div className="h-full flex flex-col bg-neutral-900/50 border-l border-neutral-800 font-mono">
-      <div className="p-4 border-b border-neutral-800 flex items-center justify-between">
-        <div className="flex items-center gap-2 text-purple-400">
-          <LayoutDashboard className="w-4 h-4" />
-          <h2 className="font-bold tracking-tight text-sm">PROJECT BOARD</h2>
-        </div>
-        <div className="flex items-center gap-3">
-          <button onClick={handleDownload} className="text-xs flex items-center gap-1 text-emerald-400 hover:text-emerald-300 transition-colors border border-emerald-500/30 px-2 py-1 rounded bg-emerald-500/10"><Download className="w-3 h-3" /> Download</button>
-          <div className="text-[10px] text-neutral-600">ID: {threadId.slice(-6)}</div>
-        </div>
+    <div className="h-full flex flex-col bg-slate-50">
+      {/* HEADER */}
+      <div className="p-4 border-b border-slate-200 bg-white flex justify-between items-center shadow-sm">
+        <h2 className="font-bold text-sm tracking-wider text-slate-800 flex items-center gap-2">
+          <FileText className="w-4 h-4 text-emerald-600" />
+          {title}
+        </h2>
+        <button 
+          onClick={handleDownload}
+          title="Download All Files"
+          className="p-2 hover:bg-slate-100 rounded-lg text-slate-500 hover:text-emerald-600 transition-colors"
+        >
+          <Download className="w-4 h-4" />
+        </button>
       </div>
-      <div className="p-4 space-y-6 overflow-y-auto flex-1">
-        <div className="bg-neutral-950 border border-neutral-800 rounded p-3">
-          <div className="text-[10px] text-neutral-500 uppercase tracking-wider mb-1">Current Status</div>
-          <div className="text-sm text-purple-300 animate-pulse">{status}</div>
+
+      {/* CONTENT SCROLL AREA */}
+      <div className="flex-1 overflow-y-auto p-4 space-y-6">
+        
+        {/* SECTION: VISION */}
+        {data.vision && (
+            <div className="bg-white rounded-xl p-4 border border-slate-200 shadow-sm">
+                <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-3">Vision & Strategy</h3>
+                <div className="prose prose-sm prose-slate max-w-none text-slate-700 leading-relaxed whitespace-pre-wrap">
+                    {data.vision}
+                </div>
+            </div>
+        )}
+
+        {/* SECTION: TASKS / ROADMAP */}
+        <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+          <div className="p-3 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
+             <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest">Roadmap</h3>
+             <span className="text-xs bg-white px-2 py-1 rounded border border-slate-200 text-slate-500 font-mono">
+                {data.tasks?.filter((t: any) => t.status === "done").length || 0} / {data.tasks?.length || 0}
+             </span>
+          </div>
+          
+          <div className="divide-y divide-slate-100">
+            {data.tasks && data.tasks.length > 0 ? (
+              data.tasks.map((task: any, i: number) => (
+                <div key={i} className="p-3 flex items-start gap-3 hover:bg-slate-50 transition-colors group">
+                  <div className="mt-0.5 shrink-0">
+                    {task.status === "done" ? (
+                      <CheckCircle2 className="w-4 h-4 text-emerald-500" />
+                    ) : task.status === "in_progress" ? (
+                      <Clock className="w-4 h-4 text-amber-500 animate-pulse" />
+                    ) : (
+                      <Circle className="w-4 h-4 text-slate-300 group-hover:text-slate-400" />
+                    )}
+                  </div>
+                  <span className={`text-sm ${task.status === "done" ? "text-slate-400 line-through decoration-slate-300" : "text-slate-700"}`}>
+                    {task.title || task.description}
+                  </span>
+                </div>
+              ))
+            ) : (
+              <div className="p-8 text-center text-slate-400 text-xs italic">
+                No active roadmap items yet.
+              </div>
+            )}
+          </div>
         </div>
-        <div className="space-y-2">
-          <div className="text-[10px] text-neutral-500 uppercase tracking-wider">Phase</div>
-          <div className="inline-block px-2 py-1 rounded text-xs font-bold border border-blue-500/30 bg-blue-500/10 text-blue-400">{phase}</div>
-        </div>
-        <div className="space-y-2">
-          <div className="text-[10px] text-neutral-500 uppercase tracking-wider flex justify-between"><span>Tasks</span><span>{tasks.length}</span></div>
-          {tasks.length === 0 ? (<div className="text-sm text-neutral-600 italic border border-dashed border-neutral-800 p-2 rounded text-center">No active tasks.</div>) : (tasks.map((task: string, i: number) => (<div key={i} className="flex items-start gap-3 p-2 bg-neutral-950/30 rounded border border-neutral-800/30"><Circle className="w-3 h-3 mt-1 text-purple-500/50" /><span className="text-xs text-neutral-300">{task}</span></div>)))}
+
+        {/* SECTION: FILES */}
+        <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+            <div className="p-3 bg-slate-50 border-b border-slate-200">
+             <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest">Artifacts</h3>
+            </div>
+            <div className="p-2 space-y-1">
+                {data.files && data.files.length > 0 ? (
+                    data.files.map((file: string, i: number) => (
+                        <div key={i} className="flex items-center gap-2 text-xs text-slate-600 font-mono p-2 hover:bg-slate-50 rounded cursor-default">
+                            <FileText className="w-3 h-3 text-slate-400" />
+                            {file}
+                        </div>
+                    ))
+                ) : (
+                    <div className="p-4 text-center text-slate-400 text-xs italic">
+                        The Vault is empty.
+                    </div>
+                )}
+            </div>
         </div>
       </div>
     </div>
