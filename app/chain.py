@@ -5,9 +5,9 @@ import json
 import asyncio
 import traceback
 from google.cloud import firestore, storage
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from typing import List, Optional, Dict, Any, Literal
+from typing import List, Optional, Dict, Any, Literal, Tuple
 from typing_extensions import TypedDict, Annotated
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage, ToolMessage
 from langgraph.graph.message import add_messages
@@ -112,10 +112,22 @@ workflow.add_node("cofounder", call_model)
 workflow.set_entry_point("cofounder")
 workflow.add_edge("cofounder", END)
 
-# --- 5. BARE METAL SAVER (WITH FIX) ---
+# --- 5. THE DUCK-TYPED SERIALIZER (OPTION A - FIXED) ---
+class TypedSerializer:
+    def dumps_typed(self, obj: Any) -> Tuple[str, bytes]:
+        data = dumpd(obj)
+        json_bytes = json.dumps(data).encode("utf-8")
+        return "json", json_bytes
+
+    def loads_typed(self, data: Tuple[str, bytes]) -> Any:
+        if data[0] != "json": raise ValueError(f"Unknown serialization type: {data[0]}")
+        json_str = data[1].decode("utf-8")
+        obj_dict = json.loads(json_str)
+        return load(obj_dict)
+
 class CustomFirestoreSaver(BaseCheckpointSaver):
     def __init__(self, client: firestore.Client, collection: str = "checkpoints"):
-        super().__init__() 
+        super().__init__(serde=TypedSerializer())
         self.client = client
         self.collection = collection
 
@@ -127,39 +139,26 @@ class CustomFirestoreSaver(BaseCheckpointSaver):
         docs = list(query.stream())
         if not docs: return None
         data = docs[0].to_dict()
-        
-        checkpoint = load(json.loads(data["checkpoint"]))
-        metadata = load(json.loads(data["metadata"]))
-        
+        checkpoint = self.serde.loads_typed(("json", data["checkpoint"].encode("utf-8")))
+        metadata = self.serde.loads_typed(("json", data["metadata"].encode("utf-8")))
         return CheckpointTuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": "", "checkpoint_id": data["checkpoint_id"]}}, checkpoint, metadata, None)
 
     async def aput(self, config, checkpoint, metadata, new_versions):
         thread_id = config["configurable"]["thread_id"]
         checkpoint_id = config["configurable"].get("checkpoint_id") or f"{int(time.time()*1000)}_{str(uuid.uuid4())[:8]}"
-        
-        chk_str = json.dumps(dumpd(checkpoint))
-        meta_str = json.dumps(dumpd(metadata))
-        
+        _, chk_bytes = self.serde.dumps_typed(checkpoint)
+        _, meta_bytes = self.serde.dumps_typed(metadata)
         doc_data = {
             "thread_id": thread_id, 
             "checkpoint_id": checkpoint_id, 
-            "checkpoint": chk_str, 
-            "metadata": meta_str, 
+            "checkpoint": chk_bytes.decode("utf-8"), 
+            "metadata": meta_bytes.decode("utf-8"), 
             "created_at": firestore.SERVER_TIMESTAMP
         }
         await asyncio.to_thread(self.client.collection(self.collection).document(f"{thread_id}_{checkpoint_id}").set, doc_data)
         return {"configurable": {"thread_id": thread_id, "checkpoint_id": checkpoint_id}}
     
-    # --- THE FIX: MANDATORY METHOD IMPLEMENTATION ---
-    async def aput_writes(self, config, writes, task_id, task_path=""):
-        """
-        Required by LangGraph v0.2+. 
-        For this 'Sidecar' architecture, intermediate writes are transient.
-        We drop them to ensure stability.
-        """
-        # print(f"DEBUG: Dropping writes for {task_id} (Sidecar Mode)")
-        pass
-
+    async def aput_writes(self, config, writes, task_id, task_path=""): pass
     def list(self, config, **kwargs): return []
     async def alist(self, config, **kwargs): return []
     def get_tuple(self, config): return None 
@@ -168,75 +167,109 @@ class CustomFirestoreSaver(BaseCheckpointSaver):
 checkpointer = CustomFirestoreSaver(db, "custom_checkpoints")
 graph = workflow.compile(checkpointer=checkpointer)
 
-# --- 6. API SETUP ---
+# --- 6. BACKGROUND WORKERS (THE SCRIBE) ---
+class ScribeOutput(BaseModel):
+    vision: str = Field(description="High-level vision.")
+    tasks: str = Field(description="Actionable tasks.")
+    project_name: str = Field(description="Short, punchy project title.")
+
+async def run_scribe_background(thread_id: str):
+    print(f"--- SCRIBE BACKGROUND STARTED for {thread_id} ---")
+    try:
+        config = {"configurable": {"thread_id": thread_id}}
+        state = await graph.aget_state(config)
+        if not state.values: return
+        
+        history_text = ""
+        for msg in state.values.get("messages", []):
+            if isinstance(msg, (HumanMessage, AIMessage)):
+                role = "User" if isinstance(msg, HumanMessage) else "Co-Founder"
+                history_text += f"{role}: {msg.content}\n\n"
+        
+        scribe_chain = (
+            ChatPromptTemplate.from_messages([
+                ("system", SCRIBE_PROMPT),
+                ("human", "Here is the conversation history:\n\n{history}")
+            ]) | llm_scribe.with_structured_output(ScribeOutput)
+        )
+        
+        extraction = await scribe_chain.ainvoke({"history": history_text})
+        doc_ref = db.collection("cofounder_boards").document(thread_id)
+        doc_ref.set({
+            "project_name": extraction.project_name, 
+            "vision": extraction.vision,
+            "tasks": [{"title": t, "status": "todo"} for t in extraction.tasks.split('\n') if t.strip()],
+            "status": "Active",
+            "updated_at": firestore.SERVER_TIMESTAMP
+        }, merge=True)
+        print(f"✅ SCRIBE COMPLETE for {thread_id}")
+    except Exception as e:
+        print(f"❌ SCRIBE FAILED: {e}")
+
+# --- 7. API ENDPOINTS ---
 app = FastAPI(title="The Co-Founder")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],)
+
+class RenameRequest(BaseModel):
+    name: str
+
+@app.post("/agent/thread/{thread_id}/rename")
+async def rename_thread(thread_id: str, req: RenameRequest):
+    try:
+        db.collection("cofounder_boards").document(thread_id).update({"project_name": req.name})
+        return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/agent/thread/{thread_id}")
+async def delete_thread(thread_id: str):
+    try:
+        db.collection("cofounder_boards").document(thread_id).delete()
+        return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/agent/thread/{thread_id}/pin")
+async def toggle_pin(thread_id: str):
+    try:
+        doc_ref = db.collection("cofounder_boards").document(thread_id)
+        doc = doc_ref.get()
+        if doc.exists:
+            current = doc.to_dict().get("is_pinned", False)
+            doc_ref.update({"is_pinned": not current})
+        return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/agent/invoke")
-async def manual_invoke(request: Request):
+async def manual_invoke(request: Request, background_tasks: BackgroundTasks):
     try:
         body = await request.json()
         input_data = body.get("input", {})
         config = body.get("config", {})
-        
         if "configurable" not in config or "thread_id" not in config["configurable"]:
             raise HTTPException(status_code=400, detail="Missing thread_id")
-            
-        print(f"--- INVOKING GRAPH for {config['configurable']['thread_id']} ---")
+        thread_id = config['configurable']['thread_id']
+        print(f"--- INVOKING GRAPH for {thread_id} ---")
+        
+        # INSTANT SAVE
+        doc_ref = db.collection("cofounder_boards").document(thread_id)
+        try:
+             await asyncio.to_thread(lambda: doc_ref.set({"updated_at": firestore.SERVER_TIMESTAMP}, merge=True))
+        except Exception: pass
+
         result = await graph.ainvoke(input_data, config=config)
+        background_tasks.add_task(run_scribe_background, thread_id)
         return {"output": result}
     except Exception as e:
         print("!!! ERROR IN MANUAL INVOKE !!!")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
-add_routes(app, graph, path="/agent_debug")
-
-# --- 7. SNAPSHOT LOGIC ---
-class ScribeOutput(BaseModel):
-    vision: str = Field(description="High-level vision.")
-    tasks: str = Field(description="Actionable tasks.")
-    project_name: str = Field(description="Short, punchy project title.")
-
 @app.post("/agent/snapshot/{thread_id}")
-async def snapshot_thread(thread_id: str):
-    print(f"--- SNAPSHOT TRIGGERED for {thread_id} ---")
-    config = {"configurable": {"thread_id": thread_id}}
-    state = await graph.aget_state(config)
-    if not state.values: return {"status": "No history found"}
-    
-    history_text = ""
-    for msg in state.values.get("messages", []):
-        if isinstance(msg, (HumanMessage, AIMessage)):
-            role = "User" if isinstance(msg, HumanMessage) else "Co-Founder"
-            history_text += f"{role}: {msg.content}\n\n"
-            
-    scribe_chain = (
-        ChatPromptTemplate.from_messages([
-            ("system", SCRIBE_PROMPT),
-            ("human", "Here is the conversation history:\n\n{history}")
-        ]) | llm_scribe.with_structured_output(ScribeOutput)
-    )
-    
-    try:
-        extraction = await scribe_chain.ainvoke({"history": history_text})
-        update_board.invoke({"thread_id": thread_id, "vision": extraction.vision, "tasks": extraction.tasks, "status": "Active"})
-        write_file.invoke({"thread_id": thread_id, "path": "VISION.md", "content": f"# {extraction.project_name}\n\n{extraction.vision}\n\n## Roadmap\n{extraction.tasks}"})
-        
-        try:
-            bucket = storage_client.bucket(BUCKET_NAME)
-            blob = bucket.blob("PROJECT_INDEX.md")
-            current_index = blob.download_as_text() if blob.exists() else ""
-            if extraction.project_name not in current_index:
-                new_index = current_index + f"\n**{extraction.project_name}:** {extraction.vision[:50]}... (Status: Active)\n"
-                blob.upload_from_string(new_index)
-                print(f"✅ Added {extraction.project_name} to Cloud Index")
-        except Exception as e: print(f"⚠️ Index Update Error: {e}")
-        
-        return {"status": "success"}
-    except Exception as e:
-        print(f"SNAPSHOT FAILED: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+async def snapshot_thread(thread_id: str, background_tasks: BackgroundTasks):
+    background_tasks.add_task(run_scribe_background, thread_id)
+    return {"status": "queued"}
 
 @app.get("/agent/history/{thread_id}")
 async def get_history(thread_id: str):
@@ -250,7 +283,7 @@ async def get_history(thread_id: str):
                 role = "user" if isinstance(msg, HumanMessage) else "assistant"
                 history.append({"role": role, "content": str(msg.content)})
         return {"messages": history}
-    except Exception as e: return {"messages": []}
+    except Exception: return {"messages": []}
 
 @app.get("/agent/projects")
 async def list_projects():
@@ -261,9 +294,16 @@ async def list_projects():
         projects = []
         for doc in docs:
             data = doc.to_dict()
-            projects.append({"thread_id": doc.id, "status": data.get("status", "Unknown"), "updated_at": data.get("updated_at").isoformat() if data.get("updated_at") else None})
+            projects.append({
+                "thread_id": doc.id, 
+                "project_name": data.get("project_name", "Untitled"), 
+                "status": data.get("status", "Unknown"), 
+                "updated_at": data.get("updated_at").isoformat() if data.get("updated_at") else None
+            })
         return {"projects": projects}
     except Exception: return {"projects": []}
 
 @app.get("/health")
 def health(): return {"status": "IT WORKS"}
+
+add_routes(app, graph, path="/agent_debug")

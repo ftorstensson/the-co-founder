@@ -1,7 +1,7 @@
 "use client";
 import { useState, useRef, useEffect, Suspense } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
-import { Send, Loader2, User, Bot, Brain, Save } from "lucide-react";
+import { Send, Loader2, User, Bot, Brain } from "lucide-react";
 import { clsx } from "clsx";
 import { twMerge } from "tailwind-merge";
 import ProjectBoard from "../components/ProjectBoard";
@@ -17,7 +17,6 @@ function AgentInterface() {
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [isSnapshotting, setIsSnapshotting] = useState(false); // <--- NEW STATE
   const [threadId, setThreadId] = useState<string>("");
 
   useEffect(() => {
@@ -47,21 +46,6 @@ function AgentInterface() {
   const switchThread = (id: string) => {
     setThreadId(id);
     router.push(`?threadId=${id}`);
-  };
-
-  // --- NEW: SNAPSHOT FUNCTION ---
-  const handleSnapshot = async () => {
-    if (!threadId) return;
-    setIsSnapshotting(true);
-    const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-    try {
-        await fetch(`${API_BASE_URL}/agent/snapshot/${threadId}`, { method: "POST" });
-        // Optional: Trigger a toast or refresh
-    } catch (e) {
-        console.error("Snapshot failed", e);
-    } finally {
-        setIsSnapshotting(false);
-    }
   };
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -101,7 +85,8 @@ function AgentInterface() {
 
   return (
     <div className="flex h-screen bg-slate-50 text-slate-900 font-sans overflow-hidden">
-      <div className="hidden lg:block border-r border-slate-200 bg-white">
+      {/* SIDEBAR: Hidden on Small, Visible on Medium+ (md:block) to support inspector view */}
+      <div className="hidden md:block border-r border-slate-200 bg-white">
         <ProjectSidebar currentId={threadId} onSelect={switchThread} />
       </div>
 
@@ -112,21 +97,10 @@ function AgentInterface() {
             <Brain className="w-5 h-5 mr-3 text-emerald-600" />
             <h1 className="text-lg font-bold tracking-tight text-slate-900">THE CO-FOUNDER <span className="text-slate-400 font-normal">CONSOLE</span></h1>
           </div>
-          
-          {/* SNAPSHOT BUTTON */}
-          <button 
-            onClick={handleSnapshot}
-            disabled={isSnapshotting}
-            className={cn(
-                "flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors border",
-                isSnapshotting 
-                    ? "bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed" 
-                    : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50 hover:border-emerald-200 hover:text-emerald-600"
-            )}
-          >
-            {isSnapshotting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-            {isSnapshotting ? "Saving..." : "Snapshot"}
-          </button>
+          <div className="text-xs text-slate-400 flex items-center gap-2">
+            {isLoading && <Loader2 className="w-3 h-3 animate-spin" />}
+            {isLoading ? "Scribe Thinking..." : "Auto-Pilot Active"}
+          </div>
         </header>
 
         {/* CHAT */}
@@ -164,7 +138,7 @@ function AgentInterface() {
           </form>
         </div>
       </div>
-      <div className="w-[400px] hidden md:block border-l border-slate-200 bg-white">
+      <div className="w-[400px] hidden lg:block border-l border-slate-200 bg-white">
         <ProjectBoard threadId={threadId} title="KNOWLEDGE BASE" />
       </div>
     </div>
