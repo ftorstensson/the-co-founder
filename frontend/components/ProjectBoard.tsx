@@ -1,7 +1,5 @@
 "use client";
 import { useEffect, useState } from "react";
-import { doc, onSnapshot } from "firebase/firestore";
-import { db } from "@/lib/firebase";
 import { Download, Layout, FileText, CheckCircle2, Circle, Clock } from "lucide-react";
 
 interface ProjectBoardProps {
@@ -9,24 +7,37 @@ interface ProjectBoardProps {
   title?: string;
 }
 
-export default function ProjectBoard({ threadId, title = "PROJECT BOARD" }: ProjectBoardProps) {
+export default function ProjectBoard({ threadId, title = "KNOWLEDGE BASE" }: ProjectBoardProps) {
   const [data, setData] = useState<any>(null);
+  
+  const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+  // ROBUST FETCHING (Replaces direct Firestore)
+  const fetchBoard = async () => {
+    if (!threadId) return;
+    try {
+        const res = await fetch(`${API_BASE_URL}/agent/projects/${threadId}`);
+        if (res.ok) {
+            const json = await res.json();
+            // Only update if data actually exists (avoid clearing on glitch)
+            if (json && Object.keys(json).length > 0) {
+                setData(json);
+            }
+        }
+    } catch (e) {
+        console.error("Board fetch error:", e);
+    }
+  };
 
   useEffect(() => {
-    if (!threadId) return;
-    
-    // ISOLATION: Listening to 'cofounder_boards' instead of 'project_boards'
-    const unsub = onSnapshot(doc(db, "cofounder_boards", threadId), (doc) => {
-      if (doc.exists()) {
-        setData(doc.data());
-      }
-    });
-    return () => unsub();
+    fetchBoard();
+    const interval = setInterval(fetchBoard, 5000); // Poll every 5s
+    return () => clearInterval(interval);
   }, [threadId]);
 
   const handleDownload = () => {
-    const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-    window.location.href = `${API_BASE_URL}/agent/download/${threadId}`;
+    // Placeholder for future download logic
+    alert("Download feature coming soon!");
   };
 
   if (!data) {
@@ -103,24 +114,13 @@ export default function ProjectBoard({ threadId, title = "PROJECT BOARD" }: Proj
           </div>
         </div>
 
-        {/* SECTION: FILES */}
+        {/* SECTION: FILES (Placeholder for now) */}
         <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
             <div className="p-3 bg-slate-50 border-b border-slate-200">
              <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest">Artifacts</h3>
             </div>
-            <div className="p-2 space-y-1">
-                {data.files && data.files.length > 0 ? (
-                    data.files.map((file: string, i: number) => (
-                        <div key={i} className="flex items-center gap-2 text-xs text-slate-600 font-mono p-2 hover:bg-slate-50 rounded cursor-default">
-                            <FileText className="w-3 h-3 text-slate-400" />
-                            {file}
-                        </div>
-                    ))
-                ) : (
-                    <div className="p-4 text-center text-slate-400 text-xs italic">
-                        The Vault is empty.
-                    </div>
-                )}
+            <div className="p-4 text-center text-slate-400 text-xs italic">
+                The Vault is empty.
             </div>
         </div>
       </div>

@@ -1,5 +1,5 @@
-# SCAR TISSUE LEDGER (v3.0 - The Co-Founder Pivot)
-*Last Updated: 2025-12-09*
+# SCAR TISSUE LEDGER (v3.1 - The Robust API Reformation)
+*Last Updated: 2025-12-12*
 
 This document is the "Black Box Recorder" of our agency. It contains the hard-won lessons (Scar Tissue) and the immutable laws of our infrastructure.
 
@@ -14,13 +14,10 @@ This document is the "Black Box Recorder" of our agency. It contains the hard-wo
 ### A. Backend Deployment (The Brain)
 *Targets the `co-founder-backend` service. Does NOT overwrite Vibe Coder.*
 
-**1. Build Image:**
-docker build -t australia-southeast1-docker.pkg.dev/vibe-agent-final/vibe-repo/co-founder-backend:latest .
+**1. Build & Push:**
+docker build -t australia-southeast1-docker.pkg.dev/vibe-agent-final/vibe-repo/co-founder-backend:latest . && docker push australia-southeast1-docker.pkg.dev/vibe-agent-final/vibe-repo/co-founder-backend:latest
 
-**2. Push Image:**
-docker push australia-southeast1-docker.pkg.dev/vibe-agent-final/vibe-repo/co-founder-backend:latest
-
-**3. Deploy Service:**
+**2. Deploy:**
 gcloud run deploy co-founder-backend --image australia-southeast1-docker.pkg.dev/vibe-agent-final/vibe-repo/co-founder-backend:latest --region australia-southeast1 --project vibe-agent-final --allow-unauthenticated
 
 ---
@@ -28,13 +25,10 @@ gcloud run deploy co-founder-backend --image australia-southeast1-docker.pkg.dev
 ### B. Frontend Deployment (The Interface)
 *Targets the `co-founder-frontend` service. Requires Build-Time Args.*
 
-**1. Build Image (With API URL):**
-docker build --build-arg NEXT_PUBLIC_API_URL=https://co-founder-backend-534939227554.australia-southeast1.run.app -t australia-southeast1-docker.pkg.dev/vibe-agent-final/vibe-repo/co-founder-frontend:latest frontend/
+**1. Build & Push (With Baked Args):**
+docker build --no-cache --build-arg NEXT_PUBLIC_API_URL=https://co-founder-backend-534939227554.australia-southeast1.run.app --build-arg NEXT_PUBLIC_FIREBASE_API_KEY=AIzaSyCK-8ucH5Ncri5d9px2DSJ7Vrk1Y0O4PYw --build-arg NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=vibe-agent-final.firebaseapp.com --build-arg NEXT_PUBLIC_FIREBASE_PROJECT_ID=vibe-agent-final --build-arg NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=vibe-agent-final.firebasestorage.app --build-arg NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=534939227554 --build-arg NEXT_PUBLIC_FIREBASE_APP_ID=1:534939227554:web:0bed74dd458e849c028efb -t australia-southeast1-docker.pkg.dev/vibe-agent-final/vibe-repo/co-founder-frontend:latest frontend/ && docker push australia-southeast1-docker.pkg.dev/vibe-agent-final/vibe-repo/co-founder-frontend:latest
 
-**2. Push Image:**
-docker push australia-southeast1-docker.pkg.dev/vibe-agent-final/vibe-repo/co-founder-frontend:latest
-
-**3. Deploy Service:**
+**2. Deploy:**
 gcloud run deploy co-founder-frontend --image australia-southeast1-docker.pkg.dev/vibe-agent-final/vibe-repo/co-founder-frontend:latest --region australia-southeast1 --project vibe-agent-final --allow-unauthenticated
 
 ---
@@ -68,6 +62,11 @@ gcloud auth configure-docker australia-southeast1-docker.pkg.dev
 ---
 
 ## 3. THE SCAR TISSUE LEDGER (LESSONS LEARNED)
+
+**Entry 023: The Client-Side Firestore Mirage**
+*   **Symptom:** Application works perfectly on `localhost`, but Sidebar and Data are empty in Cloud Run.
+*   **Diagnosis:** Direct Firebase Client SDK connections (`onSnapshot`) are fragile in Cloud environments due to strict firewall/CORS policies and "Build Time vs. Run Time" variable confusion.
+*   **Fix:** **The Robust API Proxy.** Do not let the Frontend talk to the DB directly. Make the Frontend ask the Backend (`GET /agent/projects`), and let the Backend (running in a privileged cloud container) fetch the data. It is 100% reliable.
 
 **Entry 022: The Docker Disk Exhaustion (Input/Output Error)**
 *   **Symptom:** Docker builds fail with 'write /var/lib/docker/...: input/output error'.

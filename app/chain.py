@@ -298,10 +298,22 @@ async def list_projects():
                 "thread_id": doc.id, 
                 "project_name": data.get("project_name", "Untitled"), 
                 "status": data.get("status", "Unknown"), 
-                "updated_at": data.get("updated_at").isoformat() if data.get("updated_at") else None
+                "updated_at": data.get("updated_at").isoformat() if data.get("updated_at") else None,
+                "is_pinned": data.get("is_pinned", False)
             })
         return {"projects": projects}
     except Exception: return {"projects": []}
+
+# --- NEW: SINGLE PROJECT FETCH ---
+@app.get("/agent/projects/{thread_id}")
+async def get_project(thread_id: str):
+    try:
+        doc = db.collection("cofounder_boards").document(thread_id).get()
+        if not doc.exists:
+            return {}
+        return doc.to_dict()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/health")
 def health(): return {"status": "IT WORKS"}

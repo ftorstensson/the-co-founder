@@ -1,8 +1,6 @@
 "use client";
 import { useEffect, useState, useRef } from "react";
-import { collection, query, orderBy, limit, onSnapshot } from "firebase/firestore";
-import { db } from "@/lib/firebase";
-import { MessageSquare, Clock, Plus, FolderGit2, MoreVertical, Trash2, Edit2, Pin, PinOff } from "lucide-react";
+import { MessageSquare, Clock, Plus, FolderGit2, MoreVertical, Trash2, Edit2, Pin, PinOff, Loader2 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { clsx } from "clsx";
 
@@ -16,6 +14,7 @@ interface Project {
 
 export default function ProjectSidebar({ currentId, onSelect }: { currentId: string, onSelect: (id: string) => void }) {
   const [projects, setProjects] = useState<Project[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
   const router = useRouter();
   
   // MENU STATE
@@ -24,22 +23,33 @@ export default function ProjectSidebar({ currentId, onSelect }: { currentId: str
   const [editName, setEditName] = useState("");
   const menuRef = useRef<HTMLDivElement>(null);
 
+  const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+  // POLLING FETCH (The Robust Fix)
+  const fetchProjects = async () => {
+    try {
+        const res = await fetch(`${API_BASE_URL}/agent/projects`);
+        if (res.ok) {
+            const data = await res.json();
+            const items = data.projects || [];
+            // Sort: Pinned First
+            items.sort((a: Project, b: Project) => {
+                if (a.is_pinned === b.is_pinned) return 0;
+                return a.is_pinned ? -1 : 1;
+            });
+            setProjects(items);
+        }
+    } catch (e) {
+        console.error("Sidebar fetch error:", e);
+    } finally {
+        setIsLoading(false);
+    }
+  };
+
   useEffect(() => {
-    const q = query(collection(db, "cofounder_boards"), orderBy("updated_at", "desc"), limit(50));
-    
-    const unsub = onSnapshot(q, (snapshot) => {
-      const items: Project[] = [];
-      snapshot.forEach((doc) => {
-        items.push({ thread_id: doc.id, ...doc.data() } as Project);
-      });
-      // SORT: Pinned First, then Date
-      items.sort((a, b) => {
-        if (a.is_pinned === b.is_pinned) return 0;
-        return a.is_pinned ? -1 : 1;
-      });
-      setProjects(items);
-    });
-    return () => unsub();
+    fetchProjects(); // Initial fetch
+    const interval = setInterval(fetchProjects, 5000); // Poll every 5s for updates
+    return () => clearInterval(interval);
   }, []);
 
   // Close menu when clicking outside
@@ -60,16 +70,20 @@ export default function ProjectSidebar({ currentId, onSelect }: { currentId: str
 
   const handleAction = async (e: React.MouseEvent, action: string, project: Project) => {
     e.stopPropagation();
-    const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
     setMenuOpenId(null);
 
     if (action === "pin") {
+        // Optimistic Update
+        setProjects(prev => prev.map(p => p.thread_id === project.thread_id ? {...p, is_pinned: !p.is_pinned} : p));
         await fetch(`${API_BASE_URL}/agent/thread/${project.thread_id}/pin`, { method: "POST" });
+        fetchProjects();
     }
     if (action === "delete") {
         if (!confirm("Are you sure you want to delete this session?")) return;
+        setProjects(prev => prev.filter(p => p.thread_id !== project.thread_id));
         await fetch(`${API_BASE_URL}/agent/thread/${project.thread_id}`, { method: "DELETE" });
         if (currentId === project.thread_id) router.push("/");
+        fetchProjects();
     }
     if (action === "rename") {
         setEditingId(project.thread_id);
@@ -80,13 +94,15 @@ export default function ProjectSidebar({ currentId, onSelect }: { currentId: str
   const saveRename = async (e: React.FormEvent, id: string) => {
     e.preventDefault();
     if (!editName.trim()) return;
-    const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+    setEditingId(null);
+    // Optimistic Update
+    setProjects(prev => prev.map(p => p.thread_id === id ? {...p, project_name: editName} : p));
     await fetch(`${API_BASE_URL}/agent/thread/${id}/rename`, { 
         method: "POST", 
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: editName })
     });
-    setEditingId(null);
+    fetchProjects();
   };
 
   return (
@@ -108,7 +124,12 @@ export default function ProjectSidebar({ currentId, onSelect }: { currentId: str
       </div>
 
       <div className="flex-1 overflow-y-auto p-2 space-y-1">
-        {projects.length === 0 && (
+        {isLoading && projects.length === 0 && (
+             <div className="flex justify-center p-4 text-slate-400">
+                 <Loader2 className="w-5 h-5 animate-spin" />
+             </div>
+        )}
+        {!isLoading && projects.length === 0 && (
             <div className="text-center text-xs text-slate-400 mt-4 italic">
                 No history yet.
             </div>
@@ -146,7 +167,7 @@ export default function ProjectSidebar({ currentId, onSelect }: { currentId: str
                     {p.updated_at && (
                     <div className="flex items-center gap-1 text-[10px] text-slate-400 pl-5">
                         <Clock className="w-3 h-3" />
-                        <span>{new Date(p.updated_at.seconds * 1000).toLocaleDateString()}</span>
+                        <span>{new Date(p.updated_at).toLocaleDateString()}</span>
                     </div>
                     )}
                 </button>
