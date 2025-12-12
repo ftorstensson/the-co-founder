@@ -1,21 +1,16 @@
 # FEATURE LEDGER
 
 ## CORE CAPABILITIES (PROTECTED)
-- **The "Scribe" Engine:** A background `gemini-2.5-flash` agent that silently reads conversation history and updates a structured JSON object in Firestore (Vision, Tasks, Files).
-- **The "Proxy" Data Layer:** Frontend fetches data via Backend API (`/agent/projects`), bypassing client-side firewall issues.
-- **Auto-Pilot Mode:** No "Save" button required. The system saves on every user interaction.
+- [x] **Voice Interface:** "Walkie-Talkie" style audio recording. Sends raw audio to Gemini (Multimodal) for tone/context analysis. No text-transcription middleware.
+- [x] **The "Scribe" Engine:** Background agent extracting Vision/Tasks.
+- [x] **The "Proxy" Data Layer:** Robust Server-Side fetching for Sidebar and Board.
+- [x] **Auto-Pilot Mode:** Instant save and update.
 
 ## INTERFACE
-- **Workspace Sidebar:**
-    - Sorts by Pinned, then Date.
-    - 3-Dot Context Menu (Rename, Pin, Delete).
-    - Optimistic UI updates (Instant feedback before server confirms).
-- **Knowledge Board:**
-    - Live-updating Vision Statement.
-    - Dynamic Task List (Todo/Done states).
-    - File Artifact tracking.
+- **Voice Recorder:** Visual feedback (Pulse Red), handles browser permissions seamlessly.
+- **Workspace Sidebar:** Sort by Pinned, Context Menu (Rename/Delete/Pin).
+- **Knowledge Board:** Live-updating Vision and Roadmap.
 
 ## INFRASTRUCTURE
-- **Dual-Model Brain:** Pro for Chat, Flash for Tasks.
-- **Bare Metal Persistence:** Custom Firestore serialization (No LangChain checkpoint libraries).
-- **Docker Build-Args:** Environment variables baked in at build time for production stability.
+- **Dual-Model Brain:** Pro (Chat), Flash (Scribe).
+- **Bare Metal Persistence:** Custom Firestore serialization.

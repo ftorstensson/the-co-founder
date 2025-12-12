@@ -6,6 +6,7 @@ import { clsx } from "clsx";
 import { twMerge } from "tailwind-merge";
 import ProjectBoard from "../components/ProjectBoard";
 import ProjectSidebar from "../components/ProjectSidebar";
+import VoiceRecorder from "../components/VoiceRecorder";
 
 function cn(...inputs: (string | undefined | null | false)[]) { return twMerge(clsx(inputs)); }
 interface Message { role: "user" | "assistant"; content: string; }
@@ -81,17 +82,41 @@ function AgentInterface() {
     }
   };
 
+  const handleVoiceUpload = async (audioBlob: Blob) => {
+    setIsLoading(true);
+    setMessages((prev) => [...prev, { role: "user", content: "[🎤 Audio Message Sent]" }]);
+    
+    const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+    const formData = new FormData();
+    formData.append("file", audioBlob, "recording.webm");
+    formData.append("thread_id", threadId);
+
+    try {
+        const response = await fetch(`${API_BASE_URL}/agent/voice`, {
+            method: "POST",
+            body: formData,
+        });
+        if (!response.ok) throw new Error("Voice upload failed");
+        const data = await response.json();
+        const lastMessage = data.output.messages[data.output.messages.length - 1];
+        setMessages((prev) => [...prev, { role: "assistant", content: lastMessage.content }]);
+    } catch (error) {
+        console.error("Voice Error:", error);
+        setMessages((prev) => [...prev, { role: "assistant", content: "Error: Voice processing failed." }]);
+    } finally {
+        setIsLoading(false);
+    }
+  };
+
   if (!threadId) return null;
 
   return (
     <div className="flex h-screen bg-slate-50 text-slate-900 font-sans overflow-hidden">
-      {/* SIDEBAR: Hidden on Small, Visible on Medium+ (md:block) to support inspector view */}
       <div className="hidden md:block border-r border-slate-200 bg-white">
         <ProjectSidebar currentId={threadId} onSelect={switchThread} />
       </div>
 
       <div className="flex-1 flex flex-col min-w-0 border-r border-slate-200 bg-slate-50">
-        {/* HEADER */}
         <header className="flex items-center justify-between p-4 border-b border-slate-200 bg-white shadow-sm z-10">
           <div className="flex items-center">
             <Brain className="w-5 h-5 mr-3 text-emerald-600" />
@@ -103,7 +128,6 @@ function AgentInterface() {
           </div>
         </header>
 
-        {/* CHAT */}
         <main className="flex-1 overflow-y-auto p-4 space-y-6 bg-slate-50">
           {messages.length === 0 && (
             <div className="flex flex-col items-center justify-center h-full text-slate-400 opacity-80">
@@ -130,12 +154,14 @@ function AgentInterface() {
           <div ref={messagesEndRef} />
         </main>
 
-        {/* INPUT */}
         <div className="p-4 border-t border-slate-200 bg-white">
-          <form onSubmit={handleSubmit} className="flex gap-2 relative">
-            <input value={input} onChange={(e) => setInput(e.target.value)} placeholder="Dump your thoughts here..." className="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all text-slate-900 placeholder:text-slate-400" disabled={isLoading} />
-            <button type="submit" aria-label="Send" disabled={isLoading || !input.trim()} className="px-4 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 disabled:opacity-50 disabled:hover:bg-emerald-600 transition-colors shadow-sm"><Send className="w-4 h-4" /></button>
-          </form>
+          <div className="flex gap-2 relative">
+            <VoiceRecorder onRecordingComplete={handleVoiceUpload} disabled={isLoading} />
+            <form onSubmit={handleSubmit} className="flex-1 flex gap-2">
+                <input value={input} onChange={(e) => setInput(e.target.value)} placeholder="Dump your thoughts here..." className="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all text-slate-900 placeholder:text-slate-400" disabled={isLoading} />
+                <button type="submit" aria-label="Send" disabled={isLoading || !input.trim()} className="px-4 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 disabled:opacity-50 disabled:hover:bg-emerald-600 transition-colors shadow-sm"><Send className="w-4 h-4" /></button>
+            </form>
+          </div>
         </div>
       </div>
       <div className="w-[400px] hidden lg:block border-l border-slate-200 bg-white">

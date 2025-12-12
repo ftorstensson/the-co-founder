@@ -1,7 +1,7 @@
-# SCAR TISSUE LEDGER (v3.1 - The Robust API Reformation)
-*Last Updated: 2025-12-12*
+# SCAR TISSUE LEDGER (v3.2 - The Voice Integration)
+*Last Updated: 2025-12-13*
 
-This document is the "Black Box Recorder" of our agency. It contains the hard-won lessons (Scar Tissue) and the immutable laws of our infrastructure.
+This document is the "Black Box Recorder" of our agency.
 
 ---
 
@@ -12,56 +12,26 @@ This document is the "Black Box Recorder" of our agency. It contains the hard-wo
 **REGION:** `australia-southeast1`
 
 ### A. Backend Deployment (The Brain)
-*Targets the `co-founder-backend` service. Does NOT overwrite Vibe Coder.*
-
-**1. Build & Push:**
-docker build -t australia-southeast1-docker.pkg.dev/vibe-agent-final/vibe-repo/co-founder-backend:latest . && docker push australia-southeast1-docker.pkg.dev/vibe-agent-final/vibe-repo/co-founder-backend:latest
-
-**2. Deploy:**
-gcloud run deploy co-founder-backend --image australia-southeast1-docker.pkg.dev/vibe-agent-final/vibe-repo/co-founder-backend:latest --region australia-southeast1 --project vibe-agent-final --allow-unauthenticated
-
----
+*Targets the `co-founder-backend` service.*
+**Command:**
+docker build -t australia-southeast1-docker.pkg.dev/vibe-agent-final/vibe-repo/co-founder-backend:latest . && docker push australia-southeast1-docker.pkg.dev/vibe-agent-final/vibe-repo/co-founder-backend:latest && gcloud run deploy co-founder-backend --image australia-southeast1-docker.pkg.dev/vibe-agent-final/vibe-repo/co-founder-backend:latest --region australia-southeast1 --project vibe-agent-final --allow-unauthenticated
 
 ### B. Frontend Deployment (The Interface)
 *Targets the `co-founder-frontend` service. Requires Build-Time Args.*
-
-**1. Build & Push (With Baked Args):**
-docker build --no-cache --build-arg NEXT_PUBLIC_API_URL=https://co-founder-backend-534939227554.australia-southeast1.run.app --build-arg NEXT_PUBLIC_FIREBASE_API_KEY=AIzaSyCK-8ucH5Ncri5d9px2DSJ7Vrk1Y0O4PYw --build-arg NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=vibe-agent-final.firebaseapp.com --build-arg NEXT_PUBLIC_FIREBASE_PROJECT_ID=vibe-agent-final --build-arg NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=vibe-agent-final.firebasestorage.app --build-arg NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=534939227554 --build-arg NEXT_PUBLIC_FIREBASE_APP_ID=1:534939227554:web:0bed74dd458e849c028efb -t australia-southeast1-docker.pkg.dev/vibe-agent-final/vibe-repo/co-founder-frontend:latest frontend/ && docker push australia-southeast1-docker.pkg.dev/vibe-agent-final/vibe-repo/co-founder-frontend:latest
-
-**2. Deploy:**
-gcloud run deploy co-founder-frontend --image australia-southeast1-docker.pkg.dev/vibe-agent-final/vibe-repo/co-founder-frontend:latest --region australia-southeast1 --project vibe-agent-final --allow-unauthenticated
+**Command:**
+docker build --no-cache --build-arg NEXT_PUBLIC_API_URL=https://co-founder-backend-534939227554.australia-southeast1.run.app --build-arg NEXT_PUBLIC_FIREBASE_API_KEY=AIzaSyCK-8ucH5Ncri5d9px2DSJ7Vrk1Y0O4PYw --build-arg NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=vibe-agent-final.firebaseapp.com --build-arg NEXT_PUBLIC_FIREBASE_PROJECT_ID=vibe-agent-final --build-arg NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=vibe-agent-final.firebasestorage.app --build-arg NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=534939227554 --build-arg NEXT_PUBLIC_FIREBASE_APP_ID=1:534939227554:web:0bed74dd458e849c028efb -t australia-southeast1-docker.pkg.dev/vibe-agent-final/vibe-repo/co-founder-frontend:latest frontend/ && docker push australia-southeast1-docker.pkg.dev/vibe-agent-final/vibe-repo/co-founder-frontend:latest && gcloud run deploy co-founder-frontend --image australia-southeast1-docker.pkg.dev/vibe-agent-final/vibe-repo/co-founder-frontend:latest --region australia-southeast1 --project vibe-agent-final --allow-unauthenticated
 
 ---
 
-### C. Emergency Factory Reset
-*Run this if you see `input/output error` or Docker behaves strangely.*
+## 2. THE SCAR TISSUE LEDGER (LESSONS LEARNED)
 
-**1. Prune Docker System:**
-docker system prune -a --volumes -f
-
-**2. Re-Authenticate:**
-gcloud auth configure-docker australia-southeast1-docker.pkg.dev
-
----
-
-## 2. FEATURE LEDGER (PROTECTED)
-*The definitive list of protected features. Do not modify these without explicit verification.*
-
-### Core Infrastructure
-- [x] **Hybrid Brain:** Backend uses `gemini-2.5-pro` (PM) and `gemini-2.5-flash` (Workers).
-- [x] **Gemini Protocol Adapter:** Wraps ToolMessages in HumanMessages to prevent 500 Errors.
-- [x] **Memory Persistence:** Firestore with time-sortable IDs (No Amnesia).
-- [x] **Cloud Workspace:** Writes to Google Cloud Storage (`gs://vibe-agent-user-projects`).
-
-### Interface
-- [x] **Split-Screen:** Left Chat / Right Board.
-- [x] **Sidebar:** Lists historical projects.
-- [x] **URL State:** `?threadId=...` determines context.
-- [x] **Real-Time Updates:** Firestore `onSnapshot` listeners.
-
----
-
-## 3. THE SCAR TISSUE LEDGER (LESSONS LEARNED)
+**Entry 024: The Audio Blob Bridge**
+*   **Problem:** Sending audio from Browser to Python Backend to Vertex AI without writing temp files.
+*   **Solution:**
+    1.  **Frontend:** `MediaRecorder` -> `Blob` -> `FormData` (`file`).
+    2.  **Backend:** `UploadFile` -> `await file.read()` -> `base64` encode.
+    3.  **Vertex:** `HumanMessage(content=[{"type": "media", "data": b64_data}])`.
+    *   **Note:** Do NOT try to send raw bytes directly to LangChain. Base64 is the required transport format.
 
 **Entry 023: The Client-Side Firestore Mirage**
 *   **Symptom:** Application works perfectly on `localhost`, but Sidebar and Data are empty in Cloud Run.

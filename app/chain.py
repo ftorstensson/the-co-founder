@@ -4,8 +4,9 @@ import time
 import json
 import asyncio
 import traceback
+import base64
 from google.cloud import firestore, storage
-from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional, Dict, Any, Literal, Tuple
 from typing_extensions import TypedDict, Annotated
@@ -112,7 +113,7 @@ workflow.add_node("cofounder", call_model)
 workflow.set_entry_point("cofounder")
 workflow.add_edge("cofounder", END)
 
-# --- 5. THE DUCK-TYPED SERIALIZER (OPTION A - FIXED) ---
+# --- 5. THE DUCK-TYPED SERIALIZER ---
 class TypedSerializer:
     def dumps_typed(self, obj: Any) -> Tuple[str, bytes]:
         data = dumpd(obj)
@@ -184,7 +185,11 @@ async def run_scribe_background(thread_id: str):
         for msg in state.values.get("messages", []):
             if isinstance(msg, (HumanMessage, AIMessage)):
                 role = "User" if isinstance(msg, HumanMessage) else "Co-Founder"
-                history_text += f"{role}: {msg.content}\n\n"
+                # Simple text representation for the Scribe
+                content = str(msg.content)
+                if isinstance(msg.content, list): # Handle multimodal content in history
+                    content = "[Audio/Media Message]"
+                history_text += f"{role}: {content}\n\n"
         
         scribe_chain = (
             ChatPromptTemplate.from_messages([
@@ -241,6 +246,7 @@ async def toggle_pin(thread_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# --- TEXT INVOKE ---
 @app.post("/agent/invoke")
 async def manual_invoke(request: Request, background_tasks: BackgroundTasks):
     try:
@@ -250,7 +256,6 @@ async def manual_invoke(request: Request, background_tasks: BackgroundTasks):
         if "configurable" not in config or "thread_id" not in config["configurable"]:
             raise HTTPException(status_code=400, detail="Missing thread_id")
         thread_id = config['configurable']['thread_id']
-        print(f"--- INVOKING GRAPH for {thread_id} ---")
         
         # INSTANT SAVE
         doc_ref = db.collection("cofounder_boards").document(thread_id)
@@ -263,6 +268,47 @@ async def manual_invoke(request: Request, background_tasks: BackgroundTasks):
         return {"output": result}
     except Exception as e:
         print("!!! ERROR IN MANUAL INVOKE !!!")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+# --- VOICE INVOKE (NEW) ---
+@app.post("/agent/voice")
+async def voice_invoke(thread_id: str = Form(...), file: UploadFile = File(...), background_tasks: BackgroundTasks = None):
+    print(f"--- VOICE INVOKE for {thread_id} ---")
+    try:
+        # 1. Read and Encode Audio
+        audio_bytes = await file.read()
+        audio_b64 = base64.b64encode(audio_bytes).decode('utf-8')
+        
+        # 2. Construct Multimodal Message for Gemini
+        # We assume mime_type based on common browser outputs (webm or mp4)
+        mime_type = file.content_type or "audio/webm"
+        
+        human_message = HumanMessage(
+            content=[
+                {"type": "text", "text": "(User sent an audio message. Listen carefully to the tone and content.)"},
+                {"type": "media", "mime_type": mime_type, "data": audio_b64}
+            ]
+        )
+        
+        config = {"configurable": {"thread_id": thread_id}}
+        
+        # 3. INSTANT SAVE
+        doc_ref = db.collection("cofounder_boards").document(thread_id)
+        try:
+             await asyncio.to_thread(lambda: doc_ref.set({"updated_at": firestore.SERVER_TIMESTAMP}, merge=True))
+        except Exception: pass
+
+        # 4. Invoke Graph
+        result = await graph.ainvoke({"messages": [human_message]}, config=config)
+        
+        # 5. Schedule Scribe
+        if background_tasks:
+            background_tasks.add_task(run_scribe_background, thread_id)
+            
+        return {"output": result}
+    except Exception as e:
+        print(f"!!! ERROR IN VOICE INVOKE: {e}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -281,7 +327,10 @@ async def get_history(thread_id: str):
         for msg in snapshot.values.get("messages", []):
             if isinstance(msg, (HumanMessage, AIMessage)) and not isinstance(msg, SystemMessage):
                 role = "user" if isinstance(msg, HumanMessage) else "assistant"
-                history.append({"role": role, "content": str(msg.content)})
+                content = str(msg.content)
+                if isinstance(msg.content, list): 
+                    content = "[Audio Message]"
+                history.append({"role": role, "content": content})
         return {"messages": history}
     except Exception: return {"messages": []}
 
@@ -304,13 +353,11 @@ async def list_projects():
         return {"projects": projects}
     except Exception: return {"projects": []}
 
-# --- NEW: SINGLE PROJECT FETCH ---
 @app.get("/agent/projects/{thread_id}")
 async def get_project(thread_id: str):
     try:
         doc = db.collection("cofounder_boards").document(thread_id).get()
-        if not doc.exists:
-            return {}
+        if not doc.exists: return {}
         return doc.to_dict()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
