@@ -185,9 +185,8 @@ async def run_scribe_background(thread_id: str):
         for msg in state.values.get("messages", []):
             if isinstance(msg, (HumanMessage, AIMessage)):
                 role = "User" if isinstance(msg, HumanMessage) else "Co-Founder"
-                # Simple text representation for the Scribe
                 content = str(msg.content)
-                if isinstance(msg.content, list): # Handle multimodal content in history
+                if isinstance(msg.content, list): 
                     content = "[Audio/Media Message]"
                 history_text += f"{role}: {content}\n\n"
         
@@ -218,6 +217,9 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, 
 class RenameRequest(BaseModel):
     name: str
 
+class ProfileRequest(BaseModel):
+    content: str
+
 @app.post("/agent/thread/{thread_id}/rename")
 async def rename_thread(thread_id: str, req: RenameRequest):
     try:
@@ -246,7 +248,29 @@ async def toggle_pin(thread_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# --- TEXT INVOKE ---
+# --- PROFILE ENDPOINTS (NEW) ---
+@app.get("/agent/profile")
+async def get_profile():
+    try:
+        bucket = storage_client.bucket(BUCKET_NAME)
+        blob = bucket.blob("USER_PROFILE.md")
+        if not blob.exists():
+            return {"content": ""}
+        return {"content": blob.download_as_text()}
+    except Exception as e:
+        # Don't crash if bucket missing, just return empty
+        return {"content": ""}
+
+@app.post("/agent/profile")
+async def save_profile(req: ProfileRequest):
+    try:
+        bucket = storage_client.bucket(BUCKET_NAME)
+        blob = bucket.blob("USER_PROFILE.md")
+        blob.upload_from_string(req.content)
+        return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/agent/invoke")
 async def manual_invoke(request: Request, background_tasks: BackgroundTasks):
     try:
@@ -271,17 +295,12 @@ async def manual_invoke(request: Request, background_tasks: BackgroundTasks):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
-# --- VOICE INVOKE (NEW) ---
 @app.post("/agent/voice")
 async def voice_invoke(thread_id: str = Form(...), file: UploadFile = File(...), background_tasks: BackgroundTasks = None):
     print(f"--- VOICE INVOKE for {thread_id} ---")
     try:
-        # 1. Read and Encode Audio
         audio_bytes = await file.read()
         audio_b64 = base64.b64encode(audio_bytes).decode('utf-8')
-        
-        # 2. Construct Multimodal Message for Gemini
-        # We assume mime_type based on common browser outputs (webm or mp4)
         mime_type = file.content_type or "audio/webm"
         
         human_message = HumanMessage(
@@ -293,16 +312,13 @@ async def voice_invoke(thread_id: str = Form(...), file: UploadFile = File(...),
         
         config = {"configurable": {"thread_id": thread_id}}
         
-        # 3. INSTANT SAVE
         doc_ref = db.collection("cofounder_boards").document(thread_id)
         try:
              await asyncio.to_thread(lambda: doc_ref.set({"updated_at": firestore.SERVER_TIMESTAMP}, merge=True))
         except Exception: pass
 
-        # 4. Invoke Graph
         result = await graph.ainvoke({"messages": [human_message]}, config=config)
         
-        # 5. Schedule Scribe
         if background_tasks:
             background_tasks.add_task(run_scribe_background, thread_id)
             
