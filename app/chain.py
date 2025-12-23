@@ -21,6 +21,9 @@ from pydantic import BaseModel, Field
 from app.tools import update_board, write_file
 from langserve import add_routes
 
+# --- IMPORT THE NEW ARCHITECT BRAIN ---
+from app.architect import router as architect_router
+
 # --- 1. INITIALIZATION ---
 db = firestore.Client(project=os.environ.get("GCP_PROJECT", "vibe-agent-final"))
 storage_client = storage.Client(project=os.environ.get("GCP_PROJECT", "vibe-agent-final"))
@@ -214,6 +217,9 @@ async def run_scribe_background(thread_id: str):
 app = FastAPI(title="The Co-Founder")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],)
 
+# --- MOUNT ARCHITECT ROUTER ---
+app.include_router(architect_router, prefix="/agent/design", tags=["Architect"])
+
 class RenameRequest(BaseModel):
     name: str
 
@@ -248,7 +254,7 @@ async def toggle_pin(thread_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# --- PROFILE ENDPOINTS (NEW) ---
+# --- PROFILE ENDPOINTS ---
 @app.get("/agent/profile")
 async def get_profile():
     try:
@@ -258,7 +264,6 @@ async def get_profile():
             return {"content": ""}
         return {"content": blob.download_as_text()}
     except Exception as e:
-        # Don't crash if bucket missing, just return empty
         return {"content": ""}
 
 @app.post("/agent/profile")
