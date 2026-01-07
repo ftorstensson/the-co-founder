@@ -22,7 +22,7 @@ from app.tools import update_board, write_file
 from langserve import add_routes
 
 # --- IMPORT THE NEW ARCHITECT BRAIN ---
-from app.architect import router as architect_router
+from app.agency.architect import router as architect_router
 
 # --- 1. INITIALIZATION ---
 db = firestore.Client(project=os.environ.get("GCP_PROJECT", "vibe-agent-final"))
@@ -81,7 +81,6 @@ def call_model(state: AgentState):
     raw_messages = state["messages"]
     clean_messages = []
     
-    # --- CONTEXT INJECTION ---
     try:
         bucket = storage_client.bucket(BUCKET_NAME)
         user_profile = ""
@@ -101,7 +100,6 @@ Use this context to recognize the user and their projects."""
     except Exception:
         clean_messages.append(SystemMessage(content=COFOUNDER_PROMPT))
     
-    # Sanitize History
     for msg in raw_messages:
         if isinstance(msg, SystemMessage): continue
         if isinstance(msg, (HumanMessage, AIMessage)): clean_messages.append(msg)
@@ -116,7 +114,6 @@ workflow.add_node("cofounder", call_model)
 workflow.set_entry_point("cofounder")
 workflow.add_edge("cofounder", END)
 
-# --- 5. THE DUCK-TYPED SERIALIZER ---
 class TypedSerializer:
     def dumps_typed(self, obj: Any) -> Tuple[str, bytes]:
         data = dumpd(obj)
@@ -178,44 +175,32 @@ class ScribeOutput(BaseModel):
     project_name: str = Field(description="Short, punchy project title.")
 
 async def run_scribe_background(thread_id: str):
-    print(f"--- SCRIBE BACKGROUND STARTED for {thread_id} ---")
     try:
         config = {"configurable": {"thread_id": thread_id}}
         state = await graph.aget_state(config)
         if not state.values: return
-        
         history_text = ""
         for msg in state.values.get("messages", []):
             if isinstance(msg, (HumanMessage, AIMessage)):
                 role = "User" if isinstance(msg, HumanMessage) else "Co-Founder"
                 content = str(msg.content)
-                if isinstance(msg.content, list): 
-                    content = "[Audio/Media Message]"
                 history_text += f"{role}: {content}\n\n"
-        
-        scribe_chain = (
-            ChatPromptTemplate.from_messages([
-                ("system", SCRIBE_PROMPT),
-                ("human", "Here is the conversation history:\n\n{history}")
-            ]) | llm_scribe.with_structured_output(ScribeOutput)
-        )
-        
+        scribe_chain = (ChatPromptTemplate.from_messages([("system", SCRIBE_PROMPT), ("human", "{history}")]) | llm_scribe.with_structured_output(ScribeOutput))
         extraction = await scribe_chain.ainvoke({"history": history_text})
-        doc_ref = db.collection("cofounder_boards").document(thread_id)
-        doc_ref.set({
-            "project_name": extraction.project_name, 
-            "vision": extraction.vision,
-            "tasks": [{"title": t, "status": "todo"} for t in extraction.tasks.split('\n') if t.strip()],
-            "status": "Active",
-            "updated_at": firestore.SERVER_TIMESTAMP
-        }, merge=True)
-        print(f"✅ SCRIBE COMPLETE for {thread_id}")
-    except Exception as e:
-        print(f"❌ SCRIBE FAILED: {e}")
+        db.collection("cofounder_boards").document(thread_id).set({"project_name": extraction.project_name, "vision": extraction.vision, "tasks": [{"title": t, "status": "todo"} for t in extraction.tasks.split('\n') if t.strip()], "status": "Active", "updated_at": firestore.SERVER_TIMESTAMP}, merge=True)
+    except Exception: pass
 
 # --- 7. API ENDPOINTS ---
 app = FastAPI(title="The Co-Founder")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],)
+
+# FIX: Added Port 3001 to CORS and made origins explicit
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://localhost:3001"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # --- MOUNT ARCHITECT ROUTER ---
 app.include_router(architect_router, prefix="/agent/design", tags=["Architect"])
@@ -228,160 +213,39 @@ class ProfileRequest(BaseModel):
 
 @app.post("/agent/thread/{thread_id}/rename")
 async def rename_thread(thread_id: str, req: RenameRequest):
-    try:
-        db.collection("cofounder_boards").document(thread_id).update({"project_name": req.name})
-        return {"status": "success"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    db.collection("cofounder_boards").document(thread_id).update({"project_name": req.name})
+    return {"status": "success"}
 
 @app.delete("/agent/thread/{thread_id}")
 async def delete_thread(thread_id: str):
-    try:
-        db.collection("cofounder_boards").document(thread_id).delete()
-        return {"status": "success"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    db.collection("cofounder_boards").document(thread_id).delete()
+    return {"status": "success"}
 
-@app.post("/agent/thread/{thread_id}/pin")
-async def toggle_pin(thread_id: str):
-    try:
-        doc_ref = db.collection("cofounder_boards").document(thread_id)
-        doc = doc_ref.get()
-        if doc.exists:
-            current = doc.to_dict().get("is_pinned", False)
-            doc_ref.update({"is_pinned": not current})
-        return {"status": "success"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# --- PROFILE ENDPOINTS ---
 @app.get("/agent/profile")
 async def get_profile():
-    try:
-        bucket = storage_client.bucket(BUCKET_NAME)
-        blob = bucket.blob("USER_PROFILE.md")
-        if not blob.exists():
-            return {"content": ""}
-        return {"content": blob.download_as_text()}
-    except Exception as e:
-        return {"content": ""}
+    bucket = storage_client.bucket(BUCKET_NAME)
+    blob = bucket.blob("USER_PROFILE.md")
+    return {"content": blob.download_as_text() if blob.exists() else ""}
 
 @app.post("/agent/profile")
 async def save_profile(req: ProfileRequest):
-    try:
-        bucket = storage_client.bucket(BUCKET_NAME)
-        blob = bucket.blob("USER_PROFILE.md")
-        blob.upload_from_string(req.content)
-        return {"status": "success"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    bucket = storage_client.bucket(BUCKET_NAME)
+    blob = bucket.blob("USER_PROFILE.md")
+    blob.upload_from_string(req.content)
+    return {"status": "success"}
 
 @app.post("/agent/invoke")
 async def manual_invoke(request: Request, background_tasks: BackgroundTasks):
-    try:
-        body = await request.json()
-        input_data = body.get("input", {})
-        config = body.get("config", {})
-        if "configurable" not in config or "thread_id" not in config["configurable"]:
-            raise HTTPException(status_code=400, detail="Missing thread_id")
-        thread_id = config['configurable']['thread_id']
-        
-        # INSTANT SAVE
-        doc_ref = db.collection("cofounder_boards").document(thread_id)
-        try:
-             await asyncio.to_thread(lambda: doc_ref.set({"updated_at": firestore.SERVER_TIMESTAMP}, merge=True))
-        except Exception: pass
-
-        result = await graph.ainvoke(input_data, config=config)
-        background_tasks.add_task(run_scribe_background, thread_id)
-        return {"output": result}
-    except Exception as e:
-        print("!!! ERROR IN MANUAL INVOKE !!!")
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/agent/voice")
-async def voice_invoke(thread_id: str = Form(...), file: UploadFile = File(...), background_tasks: BackgroundTasks = None):
-    print(f"--- VOICE INVOKE for {thread_id} ---")
-    try:
-        audio_bytes = await file.read()
-        audio_b64 = base64.b64encode(audio_bytes).decode('utf-8')
-        mime_type = file.content_type or "audio/webm"
-        
-        human_message = HumanMessage(
-            content=[
-                {"type": "text", "text": "(User sent an audio message. Listen carefully to the tone and content.)"},
-                {"type": "media", "mime_type": mime_type, "data": audio_b64}
-            ]
-        )
-        
-        config = {"configurable": {"thread_id": thread_id}}
-        
-        doc_ref = db.collection("cofounder_boards").document(thread_id)
-        try:
-             await asyncio.to_thread(lambda: doc_ref.set({"updated_at": firestore.SERVER_TIMESTAMP}, merge=True))
-        except Exception: pass
-
-        result = await graph.ainvoke({"messages": [human_message]}, config=config)
-        
-        if background_tasks:
-            background_tasks.add_task(run_scribe_background, thread_id)
-            
-        return {"output": result}
-    except Exception as e:
-        print(f"!!! ERROR IN VOICE INVOKE: {e}")
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/agent/snapshot/{thread_id}")
-async def snapshot_thread(thread_id: str, background_tasks: BackgroundTasks):
+    body = await request.json()
+    thread_id = body.get("config", {}).get("configurable", {}).get("thread_id")
+    result = await graph.ainvoke(body.get("input", {}), config=body.get("config", {}))
     background_tasks.add_task(run_scribe_background, thread_id)
-    return {"status": "queued"}
-
-@app.get("/agent/history/{thread_id}")
-async def get_history(thread_id: str):
-    config = {"configurable": {"thread_id": thread_id}}
-    try:
-        snapshot = await graph.aget_state(config)
-        if not snapshot.values: return {"messages": []}
-        history = []
-        for msg in snapshot.values.get("messages", []):
-            if isinstance(msg, (HumanMessage, AIMessage)) and not isinstance(msg, SystemMessage):
-                role = "user" if isinstance(msg, HumanMessage) else "assistant"
-                content = str(msg.content)
-                if isinstance(msg.content, list): 
-                    content = "[Audio Message]"
-                history.append({"role": role, "content": content})
-        return {"messages": history}
-    except Exception: return {"messages": []}
+    return {"output": result}
 
 @app.get("/agent/projects")
 async def list_projects():
-    try:
-        boards_ref = db.collection("cofounder_boards") 
-        query = boards_ref.order_by("updated_at", direction=firestore.Query.DESCENDING).limit(50)
-        docs = query.stream()
-        projects = []
-        for doc in docs:
-            data = doc.to_dict()
-            projects.append({
-                "thread_id": doc.id, 
-                "project_name": data.get("project_name", "Untitled"), 
-                "status": data.get("status", "Unknown"), 
-                "updated_at": data.get("updated_at").isoformat() if data.get("updated_at") else None,
-                "is_pinned": data.get("is_pinned", False)
-            })
-        return {"projects": projects}
-    except Exception: return {"projects": []}
-
-@app.get("/agent/projects/{thread_id}")
-async def get_project(thread_id: str):
-    try:
-        doc = db.collection("cofounder_boards").document(thread_id).get()
-        if not doc.exists: return {}
-        return doc.to_dict()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    docs = db.collection("cofounder_boards").order_by("updated_at", direction=firestore.Query.DESCENDING).limit(50).stream()
+    return {"projects": [{"thread_id": d.id, "project_name": d.to_dict().get("project_name", "Untitled"), "updated_at": d.to_dict().get("updated_at").isoformat() if d.to_dict().get("updated_at") else None} for d in docs]}
 
 @app.get("/health")
 def health(): return {"status": "IT WORKS"}
