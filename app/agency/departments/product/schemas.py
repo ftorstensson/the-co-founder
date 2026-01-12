@@ -1,20 +1,20 @@
 # PRESERVES: SYS-API, SYS-AI
-# UPDATES: SYS-BRN-016 (Executive Paper Schema)
+# UPDATES: SYS-BRN-021 (Strict Patch Schema - HARDENED)
 
 from pydantic import BaseModel, Field
 from typing import List, Optional
 
-class StrategyPaperData(BaseModel):
-    id: str = Field(description="Unique ID for the department (e.g., product_strategy, growth_lifecycle)")
-    deptId: str = Field(description="The numeric department number (1-9)")
-    label: str = Field(description="The formal title of the Position Paper")
-    version: str = Field(description="The current document version (e.g., 1.0, 1.1)")
-    icon: str = Field(description="Icon key: landscape, audience, loop, vibe, metrics, growth, message, experience, content")
-    context: str = Field(description="A high-level narrative paragraph (3-4 sentences) explaining the 'Why' behind this paper.")
-    summary: List[str] = Field(description="3-5 punchy, executive-level takeaways for the card view.")
-    report: str = Field(description="The full, high-density professional Markdown report for the deep-dive.")
+class StrategyPaperContent(BaseModel):
+    context: str = Field(description="Executive narrative paragraph (The Soul).")
+    summary: List[str] = Field(description="3-5 bold executive takeaways.")
+    report: str = Field(description="Full, professional high-density Markdown report.")
+
+class StrategyPatch(BaseModel):
+    dept_id: str = Field(description="Registry ID (e.g. product_strategy, growth_lifecycle, audience_research, category_convention).")
+    version_note: str = Field(description="What changed in this iteration?")
+    content: StrategyPaperContent
 
 class StrategySpatialOutput(BaseModel):
-    thought_process: str = Field(description="Internal specialist debate and strategic reasoning (Hidden from user).")
-    user_message: str = Field(description="The PM's social response. Use this to ask clarifying questions or explain which paper was just 'printed'.")
-    nodes: Optional[List[StrategyPaperData]] = Field(default=None, description="The list of authored executive papers to render on the canvas.")
+    thought_process: str = Field(description="Internal reasoning (Hidden).")
+    user_message: str = Field(description="Direct, warm message to the Director.")
+    patch: Optional[StrategyPatch] = Field(default=None, description="ONE department patch per turn. Use None for chat only.")
