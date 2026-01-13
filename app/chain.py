@@ -106,37 +106,60 @@ async def run_scribe_background(thread_id: str):
         db.collection("cofounder_boards").document(thread_id).set({"project_name": res.project_name, "vision": res.vision, "updated_at": firestore.SERVER_TIMESTAMP}, merge=True)
     except Exception: pass
 
-# --- SECTION F: API & THE GLOBAL HANDSHAKE ---
+# --- SECTION F: THE API (PROJECT HYGIENE) ---
 app = FastAPI(title="The Co-Founder")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
-# FIX: ALLOW ALL ORIGINS FOR CLOUD DEPLOYMENT
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# MOUNT THE AGENCY HUB
+app.include_router(architect_router, prefix="/agent/design", tags=["Architect"])
 
-# 🟢 GROUND TRUTH ROOT ROUTE
 @app.get("/")
 async def root():
-    return {
-        "status": "AGENCY ONLINE",
-        "version": "1.2.5",
-        "message": "The Brain is active and listening."
-    }
-
-app.include_router(architect_router, prefix="/agent/design", tags=["Architect"])
+    return {"status": "AGENCY ONLINE", "version": "1.2.6"}
 
 @app.get("/agent/projects")
 async def list_projects():
-    docs = db.collection("cofounder_boards").order_by("updated_at", direction=firestore.Query.DESCENDING).limit(50).stream()
-    return {"projects": [{"thread_id": d.id, "project_name": d.to_dict().get("project_name", "Untitled"), "updated_at": d.to_dict().get("updated_at").isoformat() if d.to_dict().get("updated_at") else None} for d in docs]}
+    # Note: Sorting by is_pinned requires the index you are currently building
+    docs = db.collection("cofounder_boards").order_by("is_pinned", direction=firestore.Query.DESCENDING).order_by("updated_at", direction=firestore.Query.DESCENDING).limit(50).stream()
+    return {"projects": [{"thread_id": d.id, "project_name": d.to_dict().get("project_name", "Untitled"), "updated_at": d.to_dict().get("updated_at").isoformat() if d.to_dict().get("updated_at") else None, "is_pinned": d.to_dict().get("is_pinned", False)} for d in docs]}
+
+@app.post("/agent/projects/init")
+async def init_project(req: dict):
+    thread_id = req.get("thread_id")
+    db.collection("cofounder_boards").document(thread_id).set({
+        "project_name": req.get("project_name", "UNTITLED PROJECT"),
+        "is_pinned": False,
+        "updated_at": firestore.SERVER_TIMESTAMP,
+        "vibe_manifest": None
+    })
+    return {"status": "success"}
+
+@app.get("/agent/projects/{thread_id}")
+async def get_project(thread_id: str):
+    doc = db.collection("cofounder_boards").document(thread_id).get()
+    return doc.to_dict() if doc.exists else {"error": "not found"}
+
+@app.post("/agent/projects/save")
+async def save_project(req: dict):
+    thread_id = req.get("thread_id")
+    db.collection("cofounder_boards").document(thread_id).update({
+        "vibe_manifest": req.get("manifest"),
+        "updated_at": firestore.SERVER_TIMESTAMP
+    })
+    return {"status": "success"}
 
 @app.post("/agent/thread/{thread_id}/rename")
 async def rename_thread(thread_id: str, req: dict):
     db.collection("cofounder_boards").document(thread_id).update({"project_name": req.get("name")})
+    return {"status": "success"}
+
+@app.post("/agent/thread/{thread_id}/pin")
+async def toggle_pin(thread_id: str):
+    doc_ref = db.collection("cofounder_boards").document(thread_id)
+    doc_snap = doc_ref.get()
+    if doc_snap.exists:
+        curr = doc_snap.to_dict().get("is_pinned", False)
+        doc_ref.update({"is_pinned": not curr})
     return {"status": "success"}
 
 @app.delete("/agent/thread/{thread_id}")
