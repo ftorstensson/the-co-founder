@@ -1,5 +1,5 @@
 # PRESERVES: SYS-API, SYS-AI
-# UPDATES: SYS-BRN-013 (Model ID Stabilization - FIXES 404)
+# UPDATES: SYS-BRN-023 (Model ID Migration for 2026 Stability)
 
 import os
 from langchain_google_vertexai import ChatVertexAI
@@ -15,10 +15,10 @@ def get_specialist(role: str):
     """
     
     # 1. THE PROJECT MANAGER (The Face)
-    # Target: Gemini 2.0 Flash for sub-100ms conversational rhythm.
+    # UPDATED: gemini-2.5-flash is the stable successor to 2.0-flash.
     if role == "PROJECT_MANAGER":
         return ChatVertexAI(
-            model_name="gemini-2.0-flash-001", # Stable 2026 Flash ID
+            model_name="gemini-2.5-flash", 
             project=PROJECT_ID,
             location=REGION,
             temperature=0.7, 
@@ -30,7 +30,7 @@ def get_specialist(role: str):
     # Target: Gemini 2.5 Pro (Confirmed working in your chain.py)
     if role == "ARCHITECT":
         return ChatVertexAI(
-            model_name="gemini-2.5-pro", # Using the ID already proven in your environment
+            model_name="gemini-2.5-pro", 
             project=PROJECT_ID,
             location=REGION,
             temperature=0.0, # Zero temp for strict JSON logic
@@ -40,7 +40,7 @@ def get_specialist(role: str):
 
     # DEFAULT FALLBACK
     return ChatVertexAI(
-        model_name="gemini-1.5-flash", 
+        model_name="gemini-2.5-flash", 
         project=PROJECT_ID, 
         location=REGION, 
         transport="rest"
