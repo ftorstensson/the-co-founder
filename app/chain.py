@@ -6,6 +6,7 @@ import json
 import asyncio
 import traceback
 import base64
+import logging # Added for ground truth
 from google.cloud import firestore, storage
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,6 +25,9 @@ from langserve import add_routes
 
 # --- IMPORT THE AGENCY HUB ---
 from app.agency.architect import router as architect_router
+
+# SETUP LOGGING
+logger = logging.getLogger("uvicorn.error")
 
 # --- SECTION B: CLOUD INITIALIZATION ---
 db = firestore.Client(project=os.environ.get("GCP_PROJECT", "vibe-agent-final"))
@@ -106,11 +110,10 @@ async def run_scribe_background(thread_id: str):
         db.collection("cofounder_boards").document(thread_id).set({"project_name": res.project_name, "vision": res.vision, "updated_at": firestore.SERVER_TIMESTAMP}, merge=True)
     except Exception: pass
 
-# --- SECTION F: THE API (PROJECT HYGIENE) ---
+# --- SECTION F: THE API (STABILIZED) ---
 app = FastAPI(title="The Co-Founder")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
-# MOUNT THE AGENCY HUB
 app.include_router(architect_router, prefix="/agent/design", tags=["Architect"])
 
 @app.get("/")
@@ -119,7 +122,6 @@ async def root():
 
 @app.get("/agent/projects")
 async def list_projects():
-    # Note: Sorting by is_pinned requires the index you are currently building
     docs = db.collection("cofounder_boards").order_by("is_pinned", direction=firestore.Query.DESCENDING).order_by("updated_at", direction=firestore.Query.DESCENDING).limit(50).stream()
     return {"projects": [{"thread_id": d.id, "project_name": d.to_dict().get("project_name", "Untitled"), "updated_at": d.to_dict().get("updated_at").isoformat() if d.to_dict().get("updated_at") else None, "is_pinned": d.to_dict().get("is_pinned", False)} for d in docs]}
 
@@ -142,6 +144,12 @@ async def get_project(thread_id: str):
 @app.post("/agent/projects/save")
 async def save_project(req: dict):
     thread_id = req.get("thread_id")
+    
+    # 🛡️ SHIELD: Validate thread_id exists before updating document
+    if not thread_id:
+        logger.error("❌ SAVE FAILED: No thread_id provided in request body")
+        raise HTTPException(status_code=400, detail="Missing thread_id")
+
     db.collection("cofounder_boards").document(thread_id).update({
         "vibe_manifest": req.get("manifest"),
         "updated_at": firestore.SERVER_TIMESTAMP
