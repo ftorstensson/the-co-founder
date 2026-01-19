@@ -6,7 +6,6 @@ import json
 import asyncio
 import traceback
 import base64
-import logging # Added for ground truth
 from google.cloud import firestore, storage
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,9 +25,6 @@ from langserve import add_routes
 # --- IMPORT THE AGENCY HUB ---
 from app.agency.architect import router as architect_router
 
-# SETUP LOGGING
-logger = logging.getLogger("uvicorn.error")
-
 # --- SECTION B: CLOUD INITIALIZATION ---
 db = firestore.Client(project=os.environ.get("GCP_PROJECT", "vibe-agent-final"))
 storage_client = storage.Client(project=os.environ.get("GCP_PROJECT", "vibe-agent-final"))
@@ -37,7 +33,6 @@ REGION = "us-central1"
 
 # --- SECTION C: CO-FOUNDER LOGIC ---
 COFOUNDER_PROMPT = "You are 'The Co-Founder' – a strategic partner."
-SCRIBE_PROMPT = "You are 'The Scribe' (Background Process)."
 
 safety_settings = {
     HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
@@ -47,20 +42,25 @@ safety_settings = {
 }
 
 llm_chat = ChatVertexAI(model_name="gemini-2.5-pro", project=os.environ.get("GCP_PROJECT"), location=REGION, transport="rest", safety_settings=safety_settings)
-llm_scribe = ChatVertexAI(model_name="gemini-2.5-flash", project=os.environ.get("GCP_PROJECT"), location=REGION, transport="rest", safety_settings=safety_settings)
 
 class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], add_messages]
 
 def call_model(state: AgentState):
-    return {"messages": [llm_chat.invoke(state["messages"])]}
+    # This maintains the legacy co-founder chat logic
+    clean_messages = [SystemMessage(content=COFOUNDER_PROMPT)]
+    for msg in state["messages"]:
+        if isinstance(msg, (HumanMessage, AIMessage)): 
+            clean_messages.append(msg)
+    return {"messages": [llm_chat.invoke(clean_messages)]}
 
+# --- SECTION D: GRAPH INITIALIZATION (FIXED) ---
 workflow = StateGraph(AgentState)
 workflow.add_node("cofounder", call_model)
 workflow.set_entry_point("cofounder")
 workflow.add_edge("cofounder", END)
 
-# --- SECTION D: PERSISTENCE (FIRESTORE) ---
+# --- SECTION E: PERSISTENCE (FIRESTORE CHECKPOINTER) ---
 class TypedSerializer:
     def dumps_typed(self, obj: Any) -> Tuple[str, bytes]:
         return "json", json.dumps(dumpd(obj)).encode("utf-8")
@@ -94,32 +94,18 @@ class CustomFirestoreSaver(BaseCheckpointSaver):
 checkpointer = CustomFirestoreSaver(db, "custom_checkpoints")
 graph = workflow.compile(checkpointer=checkpointer)
 
-# --- SECTION E: BACKGROUND SCRIBE ---
-class ScribeOutput(BaseModel):
-    vision: str; tasks: str; project_name: str
-
-async def run_scribe_background(thread_id: str):
-    try:
-        state = await graph.aget_state({"configurable": {"thread_id": thread_id}})
-        if not state.values: return
-        history = ""
-        for msg in state.values.get("messages", []):
-            if isinstance(msg, (HumanMessage, AIMessage)): history += f"{msg.content}\n"
-        scribe_chain = ChatPromptTemplate.from_messages([("system", SCRIBE_PROMPT), ("human", "{history}")]) | llm_scribe.with_structured_output(ScribeOutput)
-        res = await scribe_chain.ainvoke({"history": history})
-        db.collection("cofounder_boards").document(thread_id).set({"project_name": res.project_name, "vision": res.vision, "updated_at": firestore.SERVER_TIMESTAMP}, merge=True)
-    except Exception: pass
-
-# --- SECTION F: THE API (STABILIZED) ---
+# --- SECTION F: API & GLOBAL HANDSHAKE ---
 app = FastAPI(title="The Co-Founder")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
+# MOUNT THE AGENCY ENGINE
 app.include_router(architect_router, prefix="/agent/design", tags=["Architect"])
 
 @app.get("/")
 async def root():
-    return {"status": "AGENCY ONLINE", "version": "1.2.6"}
+    return {"status": "AGENCY ONLINE", "version": "1.2.9", "engine": "Liquid"}
 
+# --- SECTION G: PROJECT MANAGEMENT ---
 @app.get("/agent/projects")
 async def list_projects():
     docs = db.collection("cofounder_boards").order_by("is_pinned", direction=firestore.Query.DESCENDING).order_by("updated_at", direction=firestore.Query.DESCENDING).limit(50).stream()
@@ -128,12 +114,7 @@ async def list_projects():
 @app.post("/agent/projects/init")
 async def init_project(req: dict):
     thread_id = req.get("thread_id")
-    db.collection("cofounder_boards").document(thread_id).set({
-        "project_name": req.get("project_name", "UNTITLED PROJECT"),
-        "is_pinned": False,
-        "updated_at": firestore.SERVER_TIMESTAMP,
-        "vibe_manifest": None
-    })
+    db.collection("cofounder_boards").document(thread_id).set({"project_name": req.get("project_name", "UNTITLED PROJECT"), "is_pinned": False, "updated_at": firestore.SERVER_TIMESTAMP, "vibe_manifest": None})
     return {"status": "success"}
 
 @app.get("/agent/projects/{thread_id}")
@@ -143,17 +124,7 @@ async def get_project(thread_id: str):
 
 @app.post("/agent/projects/save")
 async def save_project(req: dict):
-    thread_id = req.get("thread_id")
-    
-    # 🛡️ SHIELD: Validate thread_id exists before updating document
-    if not thread_id:
-        logger.error("❌ SAVE FAILED: No thread_id provided in request body")
-        raise HTTPException(status_code=400, detail="Missing thread_id")
-
-    db.collection("cofounder_boards").document(thread_id).update({
-        "vibe_manifest": req.get("manifest"),
-        "updated_at": firestore.SERVER_TIMESTAMP
-    })
+    db.collection("cofounder_boards").document(req.get("thread_id")).update({"vibe_manifest": req.get("manifest"), "updated_at": firestore.SERVER_TIMESTAMP})
     return {"status": "success"}
 
 @app.post("/agent/thread/{thread_id}/rename")
@@ -161,18 +132,20 @@ async def rename_thread(thread_id: str, req: dict):
     db.collection("cofounder_boards").document(thread_id).update({"project_name": req.get("name")})
     return {"status": "success"}
 
-@app.post("/agent/thread/{thread_id}/pin")
-async def toggle_pin(thread_id: str):
-    doc_ref = db.collection("cofounder_boards").document(thread_id)
-    doc_snap = doc_ref.get()
-    if doc_snap.exists:
-        curr = doc_snap.to_dict().get("is_pinned", False)
-        doc_ref.update({"is_pinned": not curr})
-    return {"status": "success"}
-
 @app.delete("/agent/thread/{thread_id}")
 async def delete_thread(thread_id: str):
     db.collection("cofounder_boards").document(thread_id).delete()
+    return {"status": "success"}
+
+# --- SECTION H: THE AGENCY ROSTER ---
+@app.get("/agent/roster")
+async def get_roster():
+    docs = db.collection("agency_roster").stream()
+    return {"roster": [d.to_dict() for d in docs]}
+
+@app.post("/agent/roster/{agent_id}")
+async def update_agent(agent_id: str, req: dict):
+    db.collection("agency_roster").document(agent_id).set(req, merge=True)
     return {"status": "success"}
 
 @app.get("/health")
