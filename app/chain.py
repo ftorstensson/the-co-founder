@@ -6,6 +6,7 @@ import json
 import asyncio
 import traceback
 import base64
+import logging
 from google.cloud import firestore, storage
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -30,37 +31,28 @@ db = firestore.Client(project=os.environ.get("GCP_PROJECT", "vibe-agent-final"))
 storage_client = storage.Client(project=os.environ.get("GCP_PROJECT", "vibe-agent-final"))
 BUCKET_NAME = "vibe-agent-user-projects"
 REGION = "us-central1"
+logger = logging.getLogger("uvicorn.error")
 
-# --- SECTION C: CO-FOUNDER LOGIC ---
-COFOUNDER_PROMPT = "You are 'The Co-Founder' – a strategic partner."
-
+# --- SECTION C: MODEL SETUP ---
 safety_settings = {
     HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
     HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
     HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
     HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
 }
-
 llm_chat = ChatVertexAI(model_name="gemini-2.5-pro", project=os.environ.get("GCP_PROJECT"), location=REGION, transport="rest", safety_settings=safety_settings)
 
+# --- SECTION D: GRAPH LOGIC ---
 class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], add_messages]
-
 def call_model(state: AgentState):
-    # This maintains the legacy co-founder chat logic
-    clean_messages = [SystemMessage(content=COFOUNDER_PROMPT)]
-    for msg in state["messages"]:
-        if isinstance(msg, (HumanMessage, AIMessage)): 
-            clean_messages.append(msg)
-    return {"messages": [llm_chat.invoke(clean_messages)]}
-
-# --- SECTION D: GRAPH INITIALIZATION (FIXED) ---
+    return {"messages": [llm_chat.invoke(state["messages"])]}
 workflow = StateGraph(AgentState)
 workflow.add_node("cofounder", call_model)
 workflow.set_entry_point("cofounder")
 workflow.add_edge("cofounder", END)
 
-# --- SECTION E: PERSISTENCE (FIRESTORE CHECKPOINTER) ---
+# --- SECTION E: PERSISTENCE ---
 class TypedSerializer:
     def dumps_typed(self, obj: Any) -> Tuple[str, bytes]:
         return "json", json.dumps(dumpd(obj)).encode("utf-8")
@@ -81,9 +73,7 @@ class CustomFirestoreSaver(BaseCheckpointSaver):
     async def aput(self, config, checkpoint, metadata, new_versions):
         thread_id = config["configurable"]["thread_id"]
         checkpoint_id = f"{int(time.time()*1000)}"
-        _, chk_bytes = self.serde.dumps_typed(checkpoint)
-        _, meta_bytes = self.serde.dumps_typed(metadata)
-        self.client.collection(self.collection).document(f"{thread_id}_{checkpoint_id}").set({"thread_id": thread_id, "checkpoint_id": checkpoint_id, "checkpoint": chk_bytes.decode("utf-8"), "metadata": meta_bytes.decode("utf-8"), "created_at": firestore.SERVER_TIMESTAMP})
+        self.client.collection(self.collection).document(f"{thread_id}_{checkpoint_id}").set({"thread_id": thread_id, "checkpoint_id": checkpoint_id, "checkpoint": self.serde.dumps_typed(checkpoint)[1].decode("utf-8"), "metadata": self.serde.dumps_typed(metadata)[1].decode("utf-8"), "created_at": firestore.SERVER_TIMESTAMP})
         return {"configurable": {"thread_id": thread_id, "checkpoint_id": checkpoint_id}}
     async def aput_writes(self, config, writes, task_id, task_path=""): pass
     def list(self, config, **kwargs): return []
@@ -94,16 +84,13 @@ class CustomFirestoreSaver(BaseCheckpointSaver):
 checkpointer = CustomFirestoreSaver(db, "custom_checkpoints")
 graph = workflow.compile(checkpointer=checkpointer)
 
-# --- SECTION F: API & GLOBAL HANDSHAKE ---
+# --- SECTION F: THE API ---
 app = FastAPI(title="The Co-Founder")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
-
-# MOUNT THE AGENCY ENGINE
 app.include_router(architect_router, prefix="/agent/design", tags=["Architect"])
 
 @app.get("/")
-async def root():
-    return {"status": "AGENCY ONLINE", "version": "1.2.9", "engine": "Liquid"}
+async def root(): return {"status": "AGENCY ONLINE", "version": "1.3.0"}
 
 # --- SECTION G: PROJECT MANAGEMENT ---
 @app.get("/agent/projects")
@@ -113,8 +100,7 @@ async def list_projects():
 
 @app.post("/agent/projects/init")
 async def init_project(req: dict):
-    thread_id = req.get("thread_id")
-    db.collection("cofounder_boards").document(thread_id).set({"project_name": req.get("project_name", "UNTITLED PROJECT"), "is_pinned": False, "updated_at": firestore.SERVER_TIMESTAMP, "vibe_manifest": None})
+    db.collection("cofounder_boards").document(req.get("thread_id")).set({"project_name": req.get("project_name", "UNTITLED PROJECT"), "is_pinned": False, "updated_at": firestore.SERVER_TIMESTAMP, "vibe_manifest": None})
     return {"status": "success"}
 
 @app.get("/agent/projects/{thread_id}")
@@ -137,7 +123,7 @@ async def delete_thread(thread_id: str):
     db.collection("cofounder_boards").document(thread_id).delete()
     return {"status": "success"}
 
-# --- SECTION H: THE AGENCY ROSTER ---
+# --- SECTION H: THE AGENCY ROSTER (FIXED LENS ROUTES) ---
 @app.get("/agent/roster")
 async def get_roster():
     docs = db.collection("agency_roster").stream()
@@ -146,6 +132,16 @@ async def get_roster():
 @app.post("/agent/roster/{agent_id}")
 async def update_agent(agent_id: str, req: dict):
     db.collection("agency_roster").document(agent_id).set(req, merge=True)
+    return {"status": "success"}
+
+@app.get("/agent/departments")
+async def get_departments():
+    docs = db.collection("department_registry").stream()
+    return {"departments": [d.to_dict() for d in docs]}
+
+@app.post("/agent/departments/{dept_id}")
+async def update_dept(dept_id: str, req: dict):
+    db.collection("department_registry").document(dept_id).set(req, merge=True)
     return {"status": "success"}
 
 @app.get("/health")
