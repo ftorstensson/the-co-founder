@@ -40,19 +40,21 @@ safety_settings = {
     HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
     HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
 }
+
 llm_chat = ChatVertexAI(model_name="gemini-2.5-pro", project=os.environ.get("GCP_PROJECT"), location=REGION, transport="rest", safety_settings=safety_settings)
 
-# --- SECTION D: GRAPH LOGIC ---
 class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], add_messages]
+
 def call_model(state: AgentState):
     return {"messages": [llm_chat.invoke(state["messages"])]}
+
 workflow = StateGraph(AgentState)
 workflow.add_node("cofounder", call_model)
 workflow.set_entry_point("cofounder")
 workflow.add_edge("cofounder", END)
 
-# --- SECTION E: PERSISTENCE ---
+# --- SECTION E: PERSISTENCE (CHECKPOINTER) ---
 class TypedSerializer:
     def dumps_typed(self, obj: Any) -> Tuple[str, bytes]:
         return "json", json.dumps(dumpd(obj)).encode("utf-8")
@@ -73,7 +75,9 @@ class CustomFirestoreSaver(BaseCheckpointSaver):
     async def aput(self, config, checkpoint, metadata, new_versions):
         thread_id = config["configurable"]["thread_id"]
         checkpoint_id = f"{int(time.time()*1000)}"
-        self.client.collection(self.collection).document(f"{thread_id}_{checkpoint_id}").set({"thread_id": thread_id, "checkpoint_id": checkpoint_id, "checkpoint": self.serde.dumps_typed(checkpoint)[1].decode("utf-8"), "metadata": self.serde.dumps_typed(metadata)[1].decode("utf-8"), "created_at": firestore.SERVER_TIMESTAMP})
+        _, chk_bytes = self.serde.dumps_typed(checkpoint)
+        _, meta_bytes = self.serde.dumps_typed(metadata)
+        self.client.collection(self.collection).document(f"{thread_id}_{checkpoint_id}").set({"thread_id": thread_id, "checkpoint_id": checkpoint_id, "checkpoint": chk_bytes.decode("utf-8"), "metadata": meta_bytes.decode("utf-8"), "created_at": firestore.SERVER_TIMESTAMP})
         return {"configurable": {"thread_id": thread_id, "checkpoint_id": checkpoint_id}}
     async def aput_writes(self, config, writes, task_id, task_path=""): pass
     def list(self, config, **kwargs): return []
@@ -84,13 +88,16 @@ class CustomFirestoreSaver(BaseCheckpointSaver):
 checkpointer = CustomFirestoreSaver(db, "custom_checkpoints")
 graph = workflow.compile(checkpointer=checkpointer)
 
-# --- SECTION F: THE API ---
+# --- SECTION F: THE API & GLOBAL HANDSHAKE ---
 app = FastAPI(title="The Co-Founder")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+# MOUNT THE AGENCY ENGINE
 app.include_router(architect_router, prefix="/agent/design", tags=["Architect"])
 
 @app.get("/")
-async def root(): return {"status": "AGENCY ONLINE", "version": "1.3.0"}
+async def root():
+    return {"status": "AGENCY ONLINE", "version": "1.3.2", "engine": "V11 Matrix"}
 
 # --- SECTION G: PROJECT MANAGEMENT ---
 @app.get("/agent/projects")
@@ -123,7 +130,16 @@ async def delete_thread(thread_id: str):
     db.collection("cofounder_boards").document(thread_id).delete()
     return {"status": "success"}
 
-# --- SECTION H: THE AGENCY ROSTER (FIXED LENS ROUTES) ---
+@app.post("/agent/thread/{thread_id}/pin")
+async def toggle_pin(thread_id: str):
+    doc_ref = db.collection("cofounder_boards").document(thread_id)
+    doc_snap = doc_ref.get()
+    if doc_snap.exists:
+        curr = doc_snap.to_dict().get("is_pinned", False)
+        doc_ref.update({"is_pinned": not curr})
+    return {"status": "success"}
+
+# --- SECTION H: THE LIQUID ROSTER & DEPARTMENT LENSES ---
 @app.get("/agent/roster")
 async def get_roster():
     docs = db.collection("agency_roster").stream()
