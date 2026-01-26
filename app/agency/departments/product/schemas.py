@@ -4,30 +4,33 @@ from typing import List, Optional
 
 # --- SECTION B: THE STRATEGY APPENDIX ---
 class StrategyPaperAppendix(BaseModel):
-    researcher_notes: str = Field(description="Raw domain research and factual grounding (500+ words).")
-    devils_advocate_teardown: str = Field(description="Merciless critique of the model's weak points.")
-    outside_thinker_reframing: str = Field(description="Non-obvious parallels from adjacent industries.")
-    rejected_alternatives: List[str] = Field(description="List of directions considered but discarded.")
-    link_bank: List[str] = Field(description="Clickable URLs for competitors and sources.")
+    domain_research: str = Field(description="Factual grounding and search-based insights from the Researcher.")
+    critical_teardown: str = Field(description="The Devil's Advocate teardown of failure modes and Kill Conditions.")
+    lateral_reframing: str = Field(description="Adjacent industry analogies and inversion from the Lateral Thinker.")
+    opportunity_scout: str = Field(description="Value capture and monetization logic from the Scout.")
+    build_constraints: str = Field(description="Technical boundaries and MVP realism from the Constraint Specialist.")
+    synthesis_logic: str = Field(description="The partner-level reasoning behind the final Summary from the Lead Strategist.")
+    link_bank: List[str] = Field(default_factory=list, description="Clickable URLs for competitors and references.")
 
 # --- SECTION C: THE POSITION CONTENT ---
 class StrategyPaperContent(BaseModel):
-    masthead: str = Field(description="Label: e.g., THE BIG IDEA")
-    headline: str = Field(description="Expressive Serif-ready title.")
-    context: str = Field(description="Narrative establishing the project's soul.")
-    position_narrative: str = Field(description="Multi-paragraph executive summary. No bullets.")
-    uncomfortable_truths: List[str] = Field(description="Top 3 hard realities surfaced by the advocate.")
-    risky_assumptions: List[str] = Field(description="1-2 assumptions most likely to break the business.")
+    masthead: str = Field(description="Label: e.g. THE BIG IDEA")
+    headline: str = Field(description="A premium, Substack-style serif headline (Expressive).")
+    context: str = Field(description="A brief, inspirational context paragraph defining the soul.")
+    summary_content: str = Field(description="High-impact, solution-oriented executive summary. No bullets. Justified text.")
+    uncomfortable_truths: List[str] = Field(description="Top 3 hard realities.")
+    risky_assumptions: List[str] = Field(description="1-2 biggest risks.")
     appendix: StrategyPaperAppendix
 
-# --- SECTION D: THE FINAL OUTPUT ---
+# --- SECTION D: THE PATCH (Must be defined before Output) ---
 class StrategyPatch(BaseModel):
     dept_id: str = Field(description="Registry ID (e.g. the_big_idea).")
-    version_note: str = Field(description="Description of this version.")
+    version_note: str = Field(description="Brief history note.")
     content: StrategyPaperContent
 
+# --- SECTION E: THE FINAL OUTPUT ---
 class StrategySpatialOutput(BaseModel):
-    thought_process: str = Field(description="Internal specialist debate (Hidden).")
-    user_message: str = Field(description="Direct, warm conversation with the Director.")
-    suggested_project_name: Optional[str] = Field(default=None, description="Suggest a 2-3 word project name ONLY when Informed Confidence is reached.")
-    patch: Optional[StrategyPatch] = Field(default=None, description="The content update. Provide ONLY when reaching Informed Confidence.")
+    thought_process: str = Field(description="Internal strategic planning and specialist adjudication.")
+    user_message: str = Field(description="Direct, warm conversation bubble for the Director.")
+    suggested_project_name: Optional[str] = Field(default=None, description="A 2-3 word project name suggested on Turn 2.")
+    patch: Optional[StrategyPatch] = Field(default=None, description="The content update for the canvas.")
