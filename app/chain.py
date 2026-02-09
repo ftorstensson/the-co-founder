@@ -7,6 +7,7 @@ import asyncio
 import traceback
 import base64
 import logging
+from pathlib import Path
 from google.cloud import firestore, storage
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,15 +24,19 @@ from pydantic import BaseModel, Field
 from app.tools import update_board, write_file
 from langserve import add_routes
 
-# --- IMPORT THE AGENCY HUB ---
+# --- IMPORT LOCAL TOOLS ---
 from app.agency.architect import router as architect_router
+from app.audit import generate_code_signature
 
-# --- SECTION B: CLOUD INITIALIZATION ---
+# --- SECTION B: CLOUD & LOCAL CONFIG ---
 db = firestore.Client(project=os.environ.get("GCP_PROJECT", "vibe-agent-final"))
 storage_client = storage.Client(project=os.environ.get("GCP_PROJECT", "vibe-agent-final"))
 BUCKET_NAME = "vibe-agent-user-projects"
 REGION = "us-central1"
 logger = logging.getLogger("uvicorn.error")
+
+# THE BRIDGE: Path to your other VS Code environment
+FRONTEND_ROOT = os.environ.get("FRONTEND_PATH", "../vibe-design-lab")
 
 # --- SECTION C: MODEL SETUP ---
 safety_settings = {
@@ -97,7 +102,54 @@ app.include_router(architect_router, prefix="/agent/design", tags=["Architect"])
 
 @app.get("/")
 async def root():
-    return {"status": "AGENCY ONLINE", "version": "1.3.2", "engine": "V11 Matrix"}
+    return {"status": "AGENCY ONLINE", "version": "2.0.0", "engine": "Regression-Proof Eye"}
+
+# --- SECTION I: LOCAL DEVELOPMENT TOOLS (THE EYE) ---
+
+@app.get("/agent/dev/audit")
+async def run_local_audit():
+    """Runs the biological signature check on both repositories."""
+    return {"signature": generate_code_signature()}
+
+@app.post("/agent/dev/read")
+async def local_read_file(req: dict):
+    """Reads a file from either the local backend or frontend repo."""
+    target_path = req.get("path")
+    # Determine which repo to look in
+    is_frontend = target_path.startswith("src/") or target_path.startswith("public/") or "Brain/" in target_path
+    base = Path(FRONTEND_ROOT) if is_frontend else Path(".")
+    
+    file_path = base / target_path
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail=f"File not found at {file_path}")
+    
+    return {"content": file_path.read_text(), "path": str(file_path)}
+
+@app.post("/agent/dev/write_patch")
+async def local_write_patch(req: dict):
+    """
+    Applies a targeted Search-and-Replace patch to a local file.
+    This prevents full-file truncation and amnesia.
+    """
+    target_path = req.get("path")
+    search_block = req.get("search")
+    replace_block = req.get("replace")
+    
+    is_frontend = target_path.startswith("src/") or target_path.startswith("public/") or "Brain/" in target_path
+    base = Path(FRONTEND_ROOT) if is_frontend else Path(".")
+    file_path = base / target_path
+
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Target file for patch not found.")
+
+    content = file_path.read_text()
+    if search_block not in content:
+        raise HTTPException(status_code=422, detail="Search block not found in file. Patch failed.")
+
+    new_content = content.replace(search_block, replace_block)
+    file_path.write_text(new_content)
+    
+    return {"status": "success", "lines_changed": len(replace_block.splitlines())}
 
 # --- SECTION G: PROJECT MANAGEMENT ---
 @app.get("/agent/projects")
