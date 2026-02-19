@@ -9,6 +9,9 @@ db = firestore.Client(project=os.environ.get("GCP_PROJECT", "vibe-agent-final"))
 logger = logging.getLogger("uvicorn.error")
 router = APIRouter()
 
+# THE BRIDGE: Path to your other VS Code environment
+FRONTEND_ROOT = os.environ.get("FRONTEND_PATH", "../vibe-design-lab")
+
 @router.post("/generate")
 async def design_invoke(
     prompt: str = Form(None), 
@@ -25,7 +28,6 @@ async def design_invoke(
         is_interview = specialist_id and specialist_id != "null" and specialist_id != ""
 
         # --- 1. SEQUENCE GUARD ---
-        # Forces the system to build papers in order: 1 -> 2 -> 3 -> 4 -> 5
         ordered_depts = ["the_big_idea", "market_research", "audience_mapping", "user_experience", "the_mvp"]
         next_target = next((d for d in ordered_depts if not ledger.get(d, {}).get('history')), "the_big_idea")
 
@@ -34,47 +36,88 @@ async def design_invoke(
         agent_config, dept_config = get_agent_and_dept(target_id)
         from app.agency.departments.product.schemas import StrategySpatialOutput
         
-        full_instr = f"{agent_config['system_prompt']}\n\nPROJECT DNA: {ambition_dna}\n\nLens: {dept_config['lens_profile']}\nContext: {strategy_context}\n\nSTRICT: Do NOT repeat the user. Focus on moving the vision forward."
+        # --- V4.4 CONSOLIDATED AUTHORITY HIERARCHY ---
+        handbook_path = os.path.join(FRONTEND_ROOT, "Brain/AGENCY_MISSION.md")
+        handbook_content = open(handbook_path, "r").read() if os.path.exists(handbook_path) else ""
+        proj_doc = db.collection("cofounder_boards").document(project_id).get()
+        vibe_data = proj_doc.to_dict() if proj_doc.exists else {}
+        vibe_manifest = vibe_data.get("vibe_manifest") if isinstance(vibe_data.get("vibe_manifest"), dict) else {}
+        ledger_data = vibe_manifest.get("projectLedger", []) if isinstance(vibe_manifest.get("projectLedger"), list) else []
+        manifesto_data = vibe_manifest.get("missionManifesto", {})
+
+        if target_id == "master_pm":
+            target_dept_doc = db.collection("department_registry").document(next_target.upper() + "_TEAM").get()
+            checklist = target_dept_doc.to_dict().get("checklist", []) if target_dept_doc.exists else []
+            full_instr = f"[LEVEL 1: CONSTITUTION]\n{handbook_content}\n\n[LEVEL 2: MISSION MANIFESTO]\n{json.dumps(manifesto_data)}\n\n[LEVEL 3: PROJECT LEDGER]\n{json.dumps(ledger_data)}\n\n[LEVEL 4: ACTIVE MISSION CHECKLIST]\n{json.dumps(checklist)}\n\n[LEVEL 5: PERSONA]\n{agent_config['system_prompt']}\n\nMANDATE: Use the ACTIVE MISSION CHECKLIST above as your compass. Brainstorm with the Director to unearth these truths naturally. Do NOT echo. Suggest, then ask ONE question."
+        else:
+            full_instr = f"[LEVEL 1: PROJECT LEDGER (LOCKED TRUTHS)]\n{json.dumps(ledger_data)}\n\n[LEVEL 2: PERSONA]\n{agent_config['system_prompt']}\n\n[MISSION]\nFocus 100% on the vision: '{prompt}'. Do NOT mention the agency or handbook. Lens: {dept_config['lens_profile']}"
         messages = [SystemMessage(content=full_instr)]
         
         for turn in history_list:
             role = HumanMessage if turn['role'] == 'user' else AIMessage
             messages.append(role(content=turn['content']))
-        
-        if prompt: 
-            messages.append(HumanMessage(content=prompt))
+        if prompt: messages.append(HumanMessage(content=prompt))
 
-        # Invoke the PM
+        # PRIME THE ANCHORS
+        prime_vision = history_list[0]['content'] if history_list else prompt
+        
+        # TURN 1: THE SOCIAL PM (FAST LANE)
         res = agent_config['llm'].with_structured_output(StrategySpatialOutput).invoke(messages)
         pm_decision = res.dict()
         pm_decision["target_dept_id"] = next_target 
 
-        # HANDSHAKE: Auto-Naming logic
-        if target_id == "master_pm" and pm_decision.get("suggested_project_name") and project_id:
-            db.collection("cofounder_boards").document(project_id).update({"project_name": pm_decision["suggested_project_name"]})
+        # TURN 2: THE INVISIBLE SCRIBE (SLOW LANE)
+        active_manifesto = manifesto_data
+        hiring_ready = False
+        if target_id == "master_pm":
+            target_dept_doc = db.collection("department_registry").document(next_target.upper() + "_TEAM").get()
+            checklist = target_dept_doc.to_dict().get("checklist", []) if target_dept_doc.exists else []
+            from app.agency.departments.product.schemas import ScribeOutput
+            scribe_instr = f"You are the Invisible Scribe. Update the Project State. REQUIREMENTS: {json.dumps(checklist)}. Current State: {json.dumps(manifesto_data)}. MANDATE 1: If the project name is currently UNTITLED, you MUST suggest a premium 2-word name. MANDATE 2: If the Director authorized the paper, set 'hiring_authorized' to True."
+            scribe_res = agent_config['llm'].with_structured_output(ScribeOutput).invoke([SystemMessage(content=scribe_instr), HumanMessage(content=json.dumps(history_list))])
+            active_manifesto = scribe_res.mission_manifesto.dict()
+            hiring_ready = scribe_res.hiring_authorized
+            
+            # HANDSHAKE & PERSISTENCE
+            updates = {"vibe_manifest.missionManifesto": active_manifesto}
+            if scribe_res.suggested_project_name: updates["project_name"] = scribe_res.suggested_project_name
+            if scribe_res.new_decisions: updates["vibe_manifest.projectLedger"] = (ledger_data if isinstance(ledger_data, list) else []) + [d.dict() for d in scribe_res.new_decisions]
+            db.collection("cofounder_boards").document(project_id).update(updates)
+
+        pm_decision["hiring_authorized"] = hiring_ready
 
         # --- 3. TWO-STAGE PACING & SPECIALIST FIREWALL ---
-        if not is_interview and pm_decision.get("hiring_authorized"):
-            
-            # Check if we have already given the 1-minute warning in the last turn
-            user_said_go = prompt and any(x in prompt.lower() for x in ["go", "yes", "ok", "crack", "make", "create", "start"])
+        user_said_go = prompt and any(x in prompt.lower() for x in ["go", "yes", "ok", "crack", "make", "create", "start"])
+        prev_asked_to_start = any("architects cracking" in m.get('content', '').lower() for m in history_list[-2:])
+        
+        if not is_interview and (pm_decision.get("hiring_authorized") or (user_said_go and prev_asked_to_start)):
             is_warned = any("1 minute" in m.get('content', '').lower() for m in history_list[-2:])
 
             if not is_warned and not user_said_go:
-                # PM is eager but we must force the permission turn for better UX
-                logger.info("🛡️  GATE: Blocking eager hire. Forcing permission turn.")
                 pm_decision["hiring_authorized"] = False
-                pm_decision["user_message"] = f"I've got the vision for {next_target.replace('_', ' ')}. It'll take about 1 minute for the architects to debate. Shall I get them cracking?"
+                # Use the PM's actual social response, but ensure it contains the trigger question
+                msg = pm_decision.get("user_message", "")
+                if "architects" not in msg.lower():
+                    msg += f"\n\nI've got the soul of the {next_target.replace('_', ' ')}. Shall I get the architects cracking?"
+                pm_decision["user_message"] = msg
                 return pm_decision
 
-            # Permission exists -> Run Strike Team
+            # Run Strike Team
             target_dept = pm_decision["target_dept_id"]
-            logger.info(f"🏗️  STRIKE TEAM: Commencing deep work for {target_dept}")
+            # CRASH FIX: Bridge the name from the Scribe turn if available
+            suggested_name = scribe_res.suggested_project_name if target_id == "master_pm" else None
+            logger.info(f"🏗️  STRIKE TEAM: Starting {target_dept} via Mission Manifesto")
             
-            roles = ["VISIONARY", "COMMERCIAL", "REALIST", "SYNTHESIZER"]
+            ROSTERS = {
+                "the_big_idea": ["visionary", "commercial", "realist", "synthesizer"],
+                "market_research": ["scout", "historian", "analyst", "synthesizer"],
+                "audience_mapping": ["data", "jtbd", "economist", "synthesizer"],
+                "user_experience": ["designer", "modeler", "editor", "synthesizer"],
+                "the_mvp": ["analyst", "assassin", "editor", "synthesizer"]
+            }
+            roles = ROSTERS.get(target_dept, ["visionary", "commercial", "realist", "synthesizer"])
             team_results = {}
             
-            # GATHER CONSTRAINTS: Specialists MUST see previous papers to prevent drift
             constraints = ""
             for d_key, d_data in ledger.items():
                 if d_data.get('history'):
@@ -85,34 +128,28 @@ async def design_invoke(
                 agent_id = f"strat_{target_dept}_{role.lower()}"
                 s_config, s_lens = get_agent_and_dept(agent_id)
                 prev_debate = json.dumps(team_results, indent=2)
-                
-                await asyncio.sleep(1) # 🛡️ Rate limit protection for Gemini Pro
+                await asyncio.sleep(1) 
 
-                if role != "SYNTHESIZER":
-                    instr = f"{s_config['system_prompt']}\n\nDNA: {ambition_dna}\n\nANCHORS:\n{constraints}\n\nDEBATE SO FAR:\n{prev_debate}"
-                    specialist_msg = f"TASK: Audit the vision '{prompt if prompt else 'The current project'}'. Bring NEW value, do not mirror."
+                if role != "synthesizer":
+                    instr = f"{s_config['system_prompt']}\n\n[MISSION MANIFESTO]\n{json.dumps(active_manifesto)}\n\nDNA: {ambition_dna}\n\nDEBATE SO FAR:\n{prev_debate}"
+                    specialist_msg = f"MANDATE: Audit based ONLY on the Mission Manifesto. Ignore the word 'Yes' or 'Go'. Focus: {target_dept}."
                     s_res = s_config['llm'].invoke([SystemMessage(content=instr), HumanMessage(content=specialist_msg)])
-                    team_results[role.lower()] = s_res.content
+                    team_results[role] = s_res.content
                 else:
-                    # Final Synthesis Pass
                     from app.agency.departments.product.schemas import StrategyPaperContent
-                    final_instr = f"{s_config['system_prompt']}\n\nTECHNICAL DEBATE:\n{prev_debate}\n\nANCHORS:\n{constraints}\n\nMANDATE: Author the {target_dept} brief. Fill ALL fields. No Jargon."
-                    raw_paper = s_config['llm'].with_structured_output(StrategyPaperContent).invoke([SystemMessage(content=final_instr), HumanMessage(content="Finalize the Brief.")])
-                    
-                    # --- 4. THE EDITORIAL SHIELD (Final Pass) ---
-                    logger.info("✍️  EDITORIAL PASS: Global Editor-in-Chief reviewing...")
+                    final_instr = f"{s_config['system_prompt']}\n\n[MISSION MANIFESTO]\n{json.dumps(active_manifesto)}\n\nTECHNICAL DEBATE:\n{prev_debate}\n\nMANDATE: Author the {target_dept} brief. Use the Manifesto for facts. You MUST fill every single field in the schema. Do not leave blanks."
+                    raw_paper = s_config['llm'].with_structured_output(StrategyPaperContent).invoke([SystemMessage(content=final_instr), HumanMessage(content="Finalize Brief.")])
                     e_config, _ = get_agent_and_dept("global_editor")
-                    edit_msg = f"Original Brief Payload:\n{json.dumps(raw_paper.dict())}\n\nAction: Polish for the Director. Kill jargon. Make it inspiring."
-                    polished_paper = e_config['llm'].with_structured_output(StrategyPaperContent).invoke([SystemMessage(content=e_config['system_prompt']), HumanMessage(content=edit_msg)])
+                    editor_instr = f"{e_config['system_prompt']}\n\n[MISSION MANIFESTO]\n{json.dumps(active_manifesto)}\n\nMANDATE: Polish the draft. Ensure it reflects the SPECIFIC soul of the Manifesto. If it feels generic, inject specific details from the Manifesto. Fill ALL fields."
+                    polished_paper = e_config['llm'].with_structured_output(StrategyPaperContent).invoke([SystemMessage(content=editor_instr), HumanMessage(content=json.dumps(raw_paper.dict()))])
                     
                     return {
-                        "user_message": f"The team has finished. I've adjudicated the tension and the Editor-in-Chief has polished the final brief for {target_dept.replace('_', ' ')}. It's ready on the board.",
+                        "user_message": f"The team has finished. I've adjudicated the tension and the Editor-in-Chief has polished the final brief for {target_dept.replace('_', ' ')}.",
                         "patch": {"dept_id": target_dept, "content": polished_paper.dict()},
-                        "suggested_project_name": pm_decision["suggested_project_name"]
+                        "suggested_project_name": suggested_name
                     }
 
         return pm_decision
-
     except Exception as e:
         logger.error(f"❌ AGENCY ERROR: {e}")
         import traceback

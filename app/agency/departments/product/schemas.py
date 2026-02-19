@@ -1,11 +1,19 @@
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Optional, Literal
+
+# --- LEVEL 3: PROJECT MEMORY ---
+class DecisionEntry(BaseModel):
+    id: str = Field(description="e.g. DEC-001")
+    statement: str = Field(description="The atomic decision or vision anchor.")
+    state: Literal["provisional", "locked", "deprecated"] = Field(default="provisional")
+    rationale: str = Field(description="The E.L.I. reasoning behind this decision.")
+    layer: str = Field(default="STRATEGY", description="Which layer this decision anchors.")
 
 # --- SECTION 1: THE APPENDIX (Architectural Reasoning) ---
 class StrategyPaperAppendix(BaseModel):
-    architect_logic_a: str = Field(description="Visionary logic. MANDATE: 4+ paragraphs of Markdown. Bring NEW ideas.")
-    architect_logic_b: str = Field(description="Commercial logic. MANDATE: 4+ paragraphs of Markdown. Focus on Moats.")
-    architect_logic_c: str = Field(description="Build logic. MANDATE: 4+ paragraphs of Markdown. Focus on Sacrifice.")
+    architect_logic_a: str = Field(description="Primary Specialist logic. MANDATE: 4+ paragraphs of dense Markdown analysis. Use E.L.I. protocol. Do not summarize the Director; introduce new strategic leverage.")
+    architect_logic_b: str = Field(description="Secondary Specialist logic. MANDATE: 4+ paragraphs of dense Markdown analysis. Focus on moats, psychological triggers, or economic logic.")
+    architect_logic_c: str = Field(description="Tertiary Specialist logic. MANDATE: 4+ paragraphs of dense Markdown analysis. Focus on technical strategic sacrifices and the 95/5 build rule.")
     adversarial_tension: str = Field(description="Detailed teardown of disagreements.")
 
 # --- SECTION 2: THE VENTURE BRIEF CONTENT ---
@@ -53,9 +61,21 @@ class StrategyPatch(BaseModel):
     version_note: str = Field(description="Brief history note.")
     content: StrategyPaperContent
 
-class StrategySpatialOutput(BaseModel):
-    thought_process: str = Field(description="Internal reasoning.")
-    user_message: str = Field(description="The Partner's response.")
+class MissionManifesto(BaseModel):
+    problem_statement: str = Field(default="", description="The core project intent.")
+    desired_outcome: str = Field(default="", description="The successful future state.")
+    magic_differentiator: str = Field(default="", description="The 5 percent magic/soul.")
+    target_user: str = Field(default="", description="Primary audience.")
+    verbatim_quotes: List[str] = Field(default_factory=list, description="Sacred user language.")
+    emotional_drivers: List[str] = Field(default_factory=list, description="What animates the Director.")
+    unresolved_tensions: List[str] = Field(default_factory=list, description="Conflicts to resolve.")
+
+class ScribeOutput(BaseModel):
+    mission_manifesto: MissionManifesto = Field(description="The updated project state.")
     suggested_project_name: Optional[str] = Field(default=None)
     hiring_authorized: bool = Field(default=False)
-    target_dept_id: str = Field(default="the_big_idea")
+    new_decisions: List[DecisionEntry] = Field(default_factory=list)
+
+class StrategySpatialOutput(BaseModel):
+    thought_process: str = Field(description="Internal partner reasoning.")
+    user_message: str = Field(description="The social response to the Director.")
