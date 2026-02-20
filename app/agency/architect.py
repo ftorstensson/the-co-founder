@@ -48,14 +48,14 @@ async def design_invoke(
         if target_id == "master_pm":
             target_dept_doc = db.collection("department_registry").document(next_target.upper() + "_TEAM").get()
             checklist = target_dept_doc.to_dict().get("checklist", []) if target_dept_doc.exists else []
-            full_instr = f"[LEVEL 1: CONSTITUTION]\n{handbook_content}\n\n[LEVEL 2: MISSION MANIFESTO]\n{json.dumps(manifesto_data)}\n\n[LEVEL 3: PROJECT LEDGER]\n{json.dumps(ledger_data)}\n\n[LEVEL 4: ACTIVE MISSION CHECKLIST]\n{json.dumps(checklist)}\n\n[LEVEL 5: PERSONA]\n{agent_config['system_prompt']}\n\nMANDATE: Use the ACTIVE MISSION CHECKLIST above as your compass. Brainstorm with the Director to unearth these truths naturally. Do NOT echo. Suggest, then ask ONE question."
+            full_instr = f"[LEVEL 1: CONSTITUTION]\n{handbook_content}\n\n[LEVEL 2: MISSION MANIFESTO]\n{json.dumps(manifesto_data)}\n\n[LEVEL 3: PROJECT LEDGER]\n{json.dumps(ledger_data)}\n\n[LEVEL 4: ACTIVE MISSION CHECKLIST]\nPHASE: {next_target}\nGOAL: Help the Director satisfy these items: {json.dumps(checklist)}\n\n[LEVEL 5: PERSONA]\n{agent_config['system_prompt']}\n\nMANDATE: You are in the {next_target} phase. Do NOT move to other layers. Suggest a starting point for the checklist items and end with ONE sharp question."
         else:
             full_instr = f"[LEVEL 1: PROJECT LEDGER (LOCKED TRUTHS)]\n{json.dumps(ledger_data)}\n\n[LEVEL 2: PERSONA]\n{agent_config['system_prompt']}\n\n[MISSION]\nFocus 100% on the vision: '{prompt}'. Do NOT mention the agency or handbook. Lens: {dept_config['lens_profile']}"
         messages = [SystemMessage(content=full_instr)]
         
         for turn in history_list:
-            role = HumanMessage if turn['role'] == 'user' else AIMessage
-            messages.append(role(content=turn['content']))
+            role = HumanMessage if turn.get('role') == 'user' else AIMessage
+            messages.append(role(content=turn.get('content', "...")))
         if prompt: messages.append(HumanMessage(content=prompt))
 
         # PRIME THE ANCHORS
@@ -86,19 +86,16 @@ async def design_invoke(
 
         pm_decision["hiring_authorized"] = hiring_ready
 
-        # --- 3. TWO-STAGE PACING & SPECIALIST FIREWALL ---
-        user_said_go = prompt and any(x in prompt.lower() for x in ["go", "yes", "ok", "crack", "make", "create", "start"])
-        prev_asked_to_start = any("architects cracking" in m.get('content', '').lower() for m in history_list[-2:])
-        
-        if not is_interview and (pm_decision.get("hiring_authorized") or (user_said_go and prev_asked_to_start)):
+        # --- 3. TWO-STAGE PACING ---
+        if not is_interview and pm_decision.get("hiring_authorized"):
             is_warned = any("1 minute" in m.get('content', '').lower() for m in history_list[-2:])
-
-            if not is_warned and not user_said_go:
+            user_explicit_go = prompt and any(x in prompt.lower() for x in ["make", "create", "start", "go", "yes"])
+            
+            if not is_warned and not user_explicit_go:
                 pm_decision["hiring_authorized"] = False
-                # Use the PM's actual social response, but ensure it contains the trigger question
                 msg = pm_decision.get("user_message", "")
-                if "architects" not in msg.lower():
-                    msg += f"\n\nI've got the soul of the {next_target.replace('_', ' ')}. Shall I get the architects cracking?"
+                if "ready" not in msg.lower():
+                    msg += f"\n\nI've got the soul of the {next_target.replace('_', ' ')}. Shall I unleash the team?"
                 pm_decision["user_message"] = msg
                 return pm_decision
 
@@ -120,8 +117,9 @@ async def design_invoke(
             
             constraints = ""
             for d_key, d_data in ledger.items():
-                if d_data.get('history'):
-                    prev_content = d_data['history'][-1]['content']
+                history = d_data.get('history', [])
+                if history:
+                    prev_content = history[-1]
                     constraints += f"\n--- ANCHOR: {d_key} ---\n{json.dumps(prev_content)}\n"
 
             for role in roles:

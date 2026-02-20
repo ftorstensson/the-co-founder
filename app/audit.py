@@ -10,7 +10,7 @@ def generate_code_signature():
     frontend_targets = ["src/app/project/[id]/page.tsx", "src/store/vibe-store.ts", "src/components/StrategyNodes.tsx"]
     
     # NEW: The Ledger location (inside the Frontend Brain folder)
-    ledger_path = os.path.join(FRONTEND_ROOT, "Brain/TRUTH_LEDGER.md")
+    ledger_path = os.path.join(FRONTEND_ROOT, "Brain/AGENCY_MISSION.md")
     
     signature = "--- DUAL-REPO CODE SIGNATURE ---\n"
     
