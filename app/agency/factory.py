@@ -36,19 +36,37 @@ def get_agent_and_dept(agent_id: str):
             temperature=0.1
         )
         
-        # 4. 🛡️ FIX: Use the new 'google_search' key for 2026 GA models
+        # 4. 🛡️ 2026 NATIVE GROUNDING BYPASS
         if a_data.get("tools") and "google_search_retrieval" in a_data["tools"]:
-            logger.info(f"🌐 [FACTORY] Binding 'google_search' tool to {agent_id}")
+            logger.info(f"🌐 [FACTORY] Binding Native Grounding to {agent_id}")
             try:
-                # Based on the error message, the key must be exactly 'google_search'
-                search_tool = {
-                    "google_search": {} 
-                }
+                from vertexai.generative_models import Tool
+                # The 'from_dict' bypass ensures we match the server's 2026 schema
+                search_tool = Tool.from_dict({"google_search": {}})
                 llm = llm.bind_tools([search_tool])
             except Exception as tool_err:
-                logger.error(f"⚠️ [FACTORY] Failed to bind search tool: {tool_err}. Proceeding without search.")
+                logger.error(f"⚠️ [FACTORY] Grounding Bind Failed: {tool_err}")
 
-        return {"llm": llm, "system_prompt": a_data['system_prompt']}, d_data
+        # 5. LIQUID BRAIN ASSEMBLY (v1.2)
+        # Fetch Global Rules (Research/ELI/Search Protocols)
+        global_doc = db.collection("agency_settings").document("global_config").get()
+        global_rules = global_doc.to_dict().get("rules", "") if global_doc.exists else ""
+
+        full_dna = f"""[GLOBAL PROTOCOLS]
+{global_rules}
+
+[THEORETICAL FOUNDATION (EXO-BRAIN)]
+{a_data.get('exo_brain', '')}
+
+[PERSONA TONE & ROLE]
+{a_data.get('system_prompt', '')}
+
+[ADVERSARIAL CONSTRAINTS]
+- OPTIMIZATION TARGET: {a_data.get('optimization_target', '')}
+- LOSS FUNCTION (PUNISHMENTS): {a_data.get('loss_function', '')}
+- PHYSICS CONSTRAINTS: {a_data.get('physics_constraints', '')}"""
+
+        return {"llm": llm, "system_prompt": full_dna}, d_data
 
     except Exception as e:
         logger.error(f"❌ [FACTORY] Critical Error resolving {agent_id}: {e}")

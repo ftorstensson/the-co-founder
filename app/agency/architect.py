@@ -1,6 +1,6 @@
 import os, json, logging, asyncio
 from fastapi import APIRouter, Form, HTTPException
-from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
 from app.agency.factory import get_agent_and_dept
 from google.cloud import firestore
 
@@ -48,11 +48,11 @@ async def design_invoke(
         if target_id == "master_pm":
             target_dept_doc = db.collection("department_registry").document(next_target.upper() + "_TEAM").get()
             checklist = target_dept_doc.to_dict().get("checklist", []) if target_dept_doc.exists else []
-            full_instr = f"[LEVEL 1: CONSTITUTION]\n{handbook_content}\n\n[LEVEL 2: MISSION MANIFESTO]\n{json.dumps(manifesto_data)}\n\n[LEVEL 3: PROJECT LEDGER]\n{json.dumps(ledger_data)}\n\n[LEVEL 4: ACTIVE MISSION CHECKLIST]\nPHASE: {next_target}\nGOAL: Help the Director satisfy these items: {json.dumps(checklist)}\n\n[LEVEL 5: PERSONA]\n{agent_config['system_prompt']}\n\nMANDATE: You are in the {next_target} phase. Do NOT move to other layers. Suggest a starting point for the checklist items and end with ONE sharp question."
+            full_instr = f"[LEVEL 1: CONSTITUTION]\\n{handbook_content}\\n\\n[LEVEL 2: MISSION MANIFESTO]\\n{json.dumps(manifesto_data)}\\n\\n[LEVEL 3: PROJECT LEDGER]\\n{json.dumps(ledger_data)}\\n\\n[LEVEL 4: ACTIVE MISSION CHECKLIST]\\nPHASE: {next_target}\\nGOAL: Help the Director satisfy these items: {json.dumps(checklist)}\\n\\n[LEVEL 5: PERSONA]\\n{agent_config['system_prompt']}\\n\\nMANDATE: You are in the {next_target} phase. Do NOT move to other layers. Suggest a starting point for the checklist items and end with ONE sharp question."
         else:
-            full_instr = f"[LEVEL 1: PROJECT LEDGER (LOCKED TRUTHS)]\n{json.dumps(ledger_data)}\n\n[LEVEL 2: PERSONA]\n{agent_config['system_prompt']}\n\n[MISSION]\nFocus 100% on the vision: '{prompt}'. Do NOT mention the agency or handbook. Lens: {dept_config['lens_profile']}"
-        messages = [SystemMessage(content=full_instr)]
+            full_instr = f"[LEVEL 1: PROJECT LEDGER (LOCKED TRUTHS)]\\n{json.dumps(ledger_data)}\\n\\n[LEVEL 2: PERSONA]\\n{agent_config['system_prompt']}\\n\\n[MISSION]\\nFocus 100% on the vision: '{prompt}'. Do NOT mention the agency or handbook. Lens: {dept_config['lens_profile']}"
         
+        messages = [SystemMessage(content=full_instr)]
         for turn in history_list:
             role = HumanMessage if turn.get('role') == 'user' else AIMessage
             messages.append(role(content=turn.get('content', "...")))
@@ -73,7 +73,7 @@ async def design_invoke(
             target_dept_doc = db.collection("department_registry").document(next_target.upper() + "_TEAM").get()
             checklist = target_dept_doc.to_dict().get("checklist", []) if target_dept_doc.exists else []
             from app.agency.departments.product.schemas import ScribeOutput
-            scribe_instr = f"You are the Invisible Scribe. Update the Project State. REQUIREMENTS: {json.dumps(checklist)}. Current State: {json.dumps(manifesto_data)}. MANDATE 1: If the project name is currently UNTITLED, you MUST suggest a premium 2-word name. MANDATE 2: If the Director authorized the paper, set 'hiring_authorized' to True."
+            scribe_instr = f"You are the Invisible Scribe. Update the Project State. REQUIREMENTS: {json.dumps(checklist)}. Current State: {json.dumps(manifesto_data)}. MANDATE 1: If the project name is UNTITLED, suggest a premium name. MANDATE 2: If the Director authorized the paper (e.g. 'yes', 'go'), set 'hiring_authorized' to True."
             scribe_res = agent_config['llm'].with_structured_output(ScribeOutput).invoke([SystemMessage(content=scribe_instr), HumanMessage(content=json.dumps(history_list))])
             active_manifesto = scribe_res.mission_manifesto.dict()
             hiring_ready = scribe_res.hiring_authorized
@@ -99,9 +99,9 @@ async def design_invoke(
                 pm_decision["user_message"] = msg
                 return pm_decision
 
+            
             # Run Strike Team
             target_dept = pm_decision["target_dept_id"]
-            # CRASH FIX: Bridge the name from the Scribe turn if available
             suggested_name = scribe_res.suggested_project_name if target_id == "master_pm" else None
             logger.info(f"🏗️  STRIKE TEAM: Starting {target_dept} via Mission Manifesto")
             
@@ -114,6 +114,7 @@ async def design_invoke(
             }
             roles = ROSTERS.get(target_dept, ["visionary", "commercial", "realist", "synthesizer"])
             team_results = {}
+            bounty_bank = [] # NEW: To store verified URLs
             
             constraints = ""
             for d_key, d_data in ledger.items():
@@ -130,15 +131,32 @@ async def design_invoke(
 
                 if role != "synthesizer":
                     instr = f"{s_config['system_prompt']}\n\n[MISSION MANIFESTO]\n{json.dumps(active_manifesto)}\n\nDNA: {ambition_dna}\n\nDEBATE SO FAR:\n{prev_debate}"
-                    specialist_msg = f"MANDATE: Audit based ONLY on the Mission Manifesto. Ignore the word 'Yes' or 'Go'. Focus: {target_dept}."
-                    s_res = s_config['llm'].invoke([SystemMessage(content=instr), HumanMessage(content=specialist_msg)])
+                    messages = [SystemMessage(content=instr), HumanMessage(content=f"Perform a high-fidelity audit for {target_dept}. You MUST search Google for real-world metrics, competitors, and URLs from 2025/2026. Use the ELI Protocol.")]
+                    
+                    s_res = s_config['llm'].invoke(messages)
                     team_results[role] = s_res.content
+                    
+                    # THE RECEIPT HARVEST
+                    meta = s_res.response_metadata.get("grounding_metadata", {})
+                    queries = meta.get("webSearchQueries") or meta.get("retrievalQueries", [])
+                    chunks = meta.get("groundingChunks", [])
+                    
+                    if queries: logger.warning(f"🔥 [SEARCH TRUTH] {role} googled: {queries}")
+                    if chunks:
+                        for chunk in chunks:
+                            if chunk.get("web"):
+                                url_data = f"[{chunk['web'].get('title')}]({chunk['web'].get('uri')})"
+                                if url_data not in bounty_bank: bounty_bank.append(url_data)
+                        logger.warning(f"📜 [RECEIPTS] {role} cited {len(chunks)} live sources.")
                 else:
                     from app.agency.departments.product.schemas import StrategyPaperContent
-                    final_instr = f"{s_config['system_prompt']}\n\n[MISSION MANIFESTO]\n{json.dumps(active_manifesto)}\n\nTECHNICAL DEBATE:\n{prev_debate}\n\nMANDATE: Author the {target_dept} brief. Use the Manifesto for facts. You MUST fill every single field in the schema. Do not leave blanks."
+                    # INJECT THE BOUNTY BANK: Give the Synthesizer the actual URLs
+                    bounty_str = "\n".join(bounty_bank)
+                    final_instr = f"{s_config['system_prompt']}\n\n[MISSION MANIFESTO]\n{json.dumps(active_manifesto)}\n\n[VERIFIED SOURCES FOUND]\n{bounty_str}\n\nTECHNICAL DEBATE:\n{prev_debate}\n\nMANDATE: Author the {target_dept} brief. Use the Manifesto for facts and the VERIFIED SOURCES for evidence. You MUST fill every field. Include clickable markdown links from the sources."
                     raw_paper = s_config['llm'].with_structured_output(StrategyPaperContent).invoke([SystemMessage(content=final_instr), HumanMessage(content="Finalize Brief.")])
+                    
                     e_config, _ = get_agent_and_dept("global_editor")
-                    editor_instr = f"{e_config['system_prompt']}\n\n[MISSION MANIFESTO]\n{json.dumps(active_manifesto)}\n\nMANDATE: Polish the draft. Ensure it reflects the SPECIFIC soul of the Manifesto. If it feels generic, inject specific details from the Manifesto. Fill ALL fields."
+                    editor_instr = f"{e_config['system_prompt']}\n\n[MISSION MANIFESTO]\n{json.dumps(active_manifesto)}\n\n[VERIFIED SOURCES]\n{bounty_str}\n\nMANDATE: Polish the draft. Ensure it reflects the soul of the Manifesto. SACRED LAW: You must preserve at least 3 clickable markdown links from the VERIFIED SOURCES. If they are missing, add them to the Evidence section. Fill ALL fields."
                     polished_paper = e_config['llm'].with_structured_output(StrategyPaperContent).invoke([SystemMessage(content=editor_instr), HumanMessage(content=json.dumps(raw_paper.dict()))])
                     
                     return {
@@ -147,7 +165,9 @@ async def design_invoke(
                         "suggested_project_name": suggested_name
                     }
 
+
         return pm_decision
+
     except Exception as e:
         logger.error(f"❌ AGENCY ERROR: {e}")
         import traceback
