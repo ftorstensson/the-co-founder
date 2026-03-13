@@ -23,7 +23,7 @@ from langchain_core.load import dumpd, load
 from pydantic import BaseModel, Field
 from app.tools import update_board, write_file
 from langserve import add_routes
-
+from app.naming_registry import REGISTRY
 # --- IMPORT LOCAL TOOLS ---
 from app.agency.architect import router as architect_router
 from app.audit import generate_code_signature

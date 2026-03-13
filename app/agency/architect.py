@@ -1,175 +1,124 @@
-import os, json, logging, asyncio
-from fastapi import APIRouter, Form, HTTPException
-from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
-from app.agency.factory import get_agent_and_dept
-from google.cloud import firestore
+# [FUNCTIONAL LEDGER - DO NOT REMOVE]
+# 1. [STATE_INGEST]: Atomic load of project manifest.
+# 2. [TURN_A_CLERK]: Extract JSON buckets.
+# 3. [DOUBLE_LOCK_GATE]: Physics + Permission check.
+# 4. [TURN_B_AUTHOR]: Dedicated Prose turn for 2-paragraph verbatim Brief.
+# 5. [COMMIT_BRIEF]: Immediate Firestore save of the vision BEFORE research.
+# 6. [NATIVE_HOUND]: Native Vertex SDK for URL grounding.
+# 7. [STRIKE_TEAM]: Specialists ingest Brief + Raw Buckets + EXOBrain.
+# 8. [TRANSPORT_EiC]: Strip [RAW_DATA] tags and preserve markdown links.
+# 9. [PERSISTENCE]: Final atomic write of the research results.
 
-# FIXED: Capitalized Client for production stability
-db = firestore.Client(project=os.environ.get("GCP_PROJECT", "vibe-agent-final"))
+# [BANNED PATTERNS]
+# - NO POST-RESEARCH SAVES ONLY: The Brief must be saved as soon as it exists.
+# - NO MULTI-PART PASSES: Always cast specialist content to str() before Editor.
+# - NO AI-FLUFF IN BRIEF: Author turn is restricted to 2 paragraphs of user intent.
+
+import os, json, logging, asyncio, vertexai
+from fastapi import APIRouter, Form, HTTPException
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
+from app.agency.factory import get_agent_and_dept
+from langchain_google_vertexai import ChatVertexAI
+from google.cloud import firestore
+from vertexai.generative_models import GenerativeModel, Tool
+from app.agency.departments.strategy.schemas import (
+    StrategySpatialOutput, BigIdeaContent, OpportunityContent, 
+    PeopleContent, ExperienceContent, MVPContent, ScribeOutput
+)
+from app.naming_registry import REGISTRY
+from app.guardians.firewall import shield_pm as get_manifesto_display
+
+PROJECT_ID = os.environ.get("GCP_PROJECT", "vibe-agent-final")
+vertexai.init(project=PROJECT_ID, location="us-central1")
 logger = logging.getLogger("uvicorn.error")
 router = APIRouter()
-
-# THE BRIDGE: Path to your other VS Code environment
 FRONTEND_ROOT = os.environ.get("FRONTEND_PATH", "../vibe-design-lab")
+SCHEMA_MAP = {'the_big_idea': BigIdeaContent, 'the_opportunity': OpportunityContent, 'the_people': PeopleContent, 'the_experience': ExperienceContent, 'the_mvp': MVPContent}
+db = firestore.Client(project=PROJECT_ID)
 
-@router.post("/generate")
-async def design_invoke(
-    prompt: str = Form(None), 
-    layer: str = Form("STRATEGY"), 
-    project_id: str = Form(None),
-    specialist_id: str = Form(None),
-    chat_history: str = Form(None),
-    strategy_context: str = Form(None),
-    ambition_dna: str = Form(None)
-):
+@router.post('/generate')
+async def design_invoke(prompt: str = Form(None), layer: str = Form('STRATEGY'), project_id: str = Form(None), specialist_id: str = Form(None), chat_history: str = Form(None), strategy_context: str = Form(None)):
     try:
         history_list = json.loads(chat_history) if chat_history else []
-        ledger = json.loads(strategy_context) if strategy_context else {}
-        is_interview = specialist_id and specialist_id != "null" and specialist_id != ""
-
-        # --- 1. SEQUENCE GUARD ---
-        ordered_depts = ["the_big_idea", "market_research", "audience_mapping", "user_experience", "the_mvp"]
-        next_target = next((d for d in ordered_depts if not ledger.get(d, {}).get('history')), "the_big_idea")
-
-        # --- 2. THE PARTNER PHASE (PM) ---
-        target_id = specialist_id if is_interview else "master_pm"
-        agent_config, dept_config = get_agent_and_dept(target_id)
-        from app.agency.departments.product.schemas import StrategySpatialOutput
+        is_interview = bool(specialist_id and specialist_id != 'null' and specialist_id != '')
         
-        # --- V4.4 CONSOLIDATED AUTHORITY HIERARCHY ---
-        handbook_path = os.path.join(FRONTEND_ROOT, "Brain/AGENCY_MISSION.md")
-        handbook_content = open(handbook_path, "r").read() if os.path.exists(handbook_path) else ""
-        proj_doc = db.collection("cofounder_boards").document(project_id).get()
-        vibe_data = proj_doc.to_dict() if proj_doc.exists else {}
-        vibe_manifest = vibe_data.get("vibe_manifest") if isinstance(vibe_data.get("vibe_manifest"), dict) else {}
-        ledger_data = vibe_manifest.get("projectLedger", []) if isinstance(vibe_manifest.get("projectLedger"), list) else []
-        manifesto_data = vibe_manifest.get("missionManifesto", {})
+        proj_doc = db.collection('cofounder_boards').document(project_id).get()
+        proj_data = proj_doc.to_dict() if proj_doc.exists else {}
+        v_man = proj_data.get('vibe_manifest') or {}
+        active_manifesto = v_man.get(REGISTRY.MANIFESTO) or {}
 
-        if target_id == "master_pm":
-            target_dept_doc = db.collection("department_registry").document(next_target.upper() + "_TEAM").get()
-            checklist = target_dept_doc.to_dict().get("checklist", []) if target_dept_doc.exists else []
-            full_instr = f"[LEVEL 1: CONSTITUTION]\\n{handbook_content}\\n\\n[LEVEL 2: MISSION MANIFESTO]\\n{json.dumps(manifesto_data)}\\n\\n[LEVEL 3: PROJECT LEDGER]\\n{json.dumps(ledger_data)}\\n\\n[LEVEL 4: ACTIVE MISSION CHECKLIST]\\nPHASE: {next_target}\\nGOAL: Help the Director satisfy these items: {json.dumps(checklist)}\\n\\n[LEVEL 5: PERSONA]\\n{agent_config['system_prompt']}\\n\\nMANDATE: You are in the {next_target} phase. Do NOT move to other layers. Suggest a starting point for the checklist items and end with ONE sharp question."
-        else:
-            full_instr = f"[LEVEL 1: PROJECT LEDGER (LOCKED TRUTHS)]\\n{json.dumps(ledger_data)}\\n\\n[LEVEL 2: PERSONA]\\n{agent_config['system_prompt']}\\n\\n[MISSION]\\nFocus 100% on the vision: '{prompt}'. Do NOT mention the agency or handbook. Lens: {dept_config['lens_profile']}"
+        # [TURN_A_CLERK]
+        scribe_c, _ = get_agent_and_dept('master_pm')
+        scribe_instr = "You are the Librarian (IQ). Verbatim extract facts: core_idea, target_user, founder_frustration, competitor_belief, business_model, success_sentence. Set user_confirmed_start=True ONLY on explicit permission."
         
-        messages = [SystemMessage(content=full_instr)]
-        for turn in history_list:
-            role = HumanMessage if turn.get('role') == 'user' else AIMessage
-            messages.append(role(content=turn.get('content', "...")))
-        if prompt: messages.append(HumanMessage(content=prompt))
-
-        # PRIME THE ANCHORS
-        prime_vision = history_list[0]['content'] if history_list else prompt
+        scribe_res = scribe_c['llm'].with_structured_output(ScribeOutput).invoke([
+            SystemMessage(content=scribe_instr), HumanMessage(content=json.dumps(history_list + [{'role': 'user', 'content': prompt}]))
+        ])
         
-        # TURN 1: THE SOCIAL PM (FAST LANE)
-        res = agent_config['llm'].with_structured_output(StrategySpatialOutput).invoke(messages)
-        pm_decision = res.dict()
-        pm_decision["target_dept_id"] = next_target 
+        if scribe_res:
+            active_manifesto.update({k: v for k, v in scribe_res.mission_manifesto.dict().items() if v and k != 'problem_statement'})
 
-        # TURN 2: THE INVISIBLE SCRIBE (SLOW LANE)
-        active_manifesto = manifesto_data
-        hiring_ready = False
-        if target_id == "master_pm":
-            target_dept_doc = db.collection("department_registry").document(next_target.upper() + "_TEAM").get()
-            checklist = target_dept_doc.to_dict().get("checklist", []) if target_dept_doc.exists else []
-            from app.agency.departments.product.schemas import ScribeOutput
-            scribe_instr = f"You are the Invisible Scribe. Update the Project State. REQUIREMENTS: {json.dumps(checklist)}. Current State: {json.dumps(manifesto_data)}. MANDATE 1: If the project name is UNTITLED, suggest a premium name. MANDATE 2: If the Director authorized the paper (e.g. 'yes', 'go'), set 'hiring_authorized' to True."
-            scribe_res = agent_config['llm'].with_structured_output(ScribeOutput).invoke([SystemMessage(content=scribe_instr), HumanMessage(content=json.dumps(history_list))])
-            active_manifesto = scribe_res.mission_manifesto.dict()
-            hiring_ready = scribe_res.hiring_authorized
-            
-            # HANDSHAKE & PERSISTENCE
-            updates = {"vibe_manifest.missionManifesto": active_manifesto}
-            if scribe_res.suggested_project_name: updates["project_name"] = scribe_res.suggested_project_name
-            if scribe_res.new_decisions: updates["vibe_manifest.projectLedger"] = (ledger_data if isinstance(ledger_data, list) else []) + [d.dict() for d in scribe_res.new_decisions]
-            db.collection("cofounder_boards").document(project_id).update(updates)
+        # [DOUBLE_LOCK_GATE]
+        req_keys = ['founder_frustration', 'competitor_belief', 'business_model', 'success_sentence']
+        missing = [k.replace('_', ' ') for k in req_keys if len(str(active_manifesto.get(k, ""))) < 15]
+        physics_open = len(missing) == 0
+        permission_open = scribe_res.user_confirmed_start if (scribe_res and physics_open) else False
+        hiring_authorized = physics_open and permission_open
+        logger.warning(f"[GATE] Physics: {physics_open} | Permission: {permission_open} | Gaps: {missing}")
 
-        pm_decision["hiring_authorized"] = hiring_ready
+        strike_result = None
+        if (hiring_authorized or is_interview) and not is_interview:
+            # [TURN_B_AUTHOR]
+            author_res = scribe_c['llm'].invoke([
+                SystemMessage(content=f"You are the Author. Write a 2-paragraph summary of the Founder's Intent based on: {json.dumps(active_manifesto)}. Capture the 'Gumboots' detail. No fluff."),
+                HumanMessage(content="Write Official Brief.")
+            ])
+            active_manifesto['problem_statement'] = author_res.content
+            
+            # [COMMIT_BRIEF]: Save the vision BEFORE the heavy research starts
+            v_man[REGISTRY.MANIFESTO] = active_manifesto
+            db.collection('cofounder_boards').document(project_id).set({'vibe_manifest': v_man}, merge=True)
+            logger.warning("[COMMIT] Brief saved to Firestore.")
 
-        # --- 3. TWO-STAGE PACING ---
-        if not is_interview and pm_decision.get("hiring_authorized"):
-            is_warned = any("1 minute" in m.get('content', '').lower() for m in history_list[-2:])
-            user_explicit_go = prompt and any(x in prompt.lower() for x in ["make", "create", "start", "go", "yes"])
-            
-            if not is_warned and not user_explicit_go:
-                pm_decision["hiring_authorized"] = False
-                msg = pm_decision.get("user_message", "")
-                if "ready" not in msg.lower():
-                    msg += f"\n\nI've got the soul of the {next_target.replace('_', ' ')}. Shall I unleash the team?"
-                pm_decision["user_message"] = msg
-                return pm_decision
-
-            
-            # Run Strike Team
-            target_dept = pm_decision["target_dept_id"]
-            suggested_name = scribe_res.suggested_project_name if target_id == "master_pm" else None
-            logger.info(f"🏗️  STRIKE TEAM: Starting {target_dept} via Mission Manifesto")
-            
-            ROSTERS = {
-                "the_big_idea": ["visionary", "commercial", "realist", "synthesizer"],
-                "market_research": ["scout", "historian", "analyst", "synthesizer"],
-                "audience_mapping": ["data", "jtbd", "economist", "synthesizer"],
-                "user_experience": ["designer", "modeler", "editor", "synthesizer"],
-                "the_mvp": ["analyst", "assassin", "editor", "synthesizer"]
-            }
-            roles = ROSTERS.get(target_dept, ["visionary", "commercial", "realist", "synthesizer"])
-            team_results = {}
-            bounty_bank = [] # NEW: To store verified URLs
-            
-            constraints = ""
-            for d_key, d_data in ledger.items():
-                history = d_data.get('history', [])
-                if history:
-                    prev_content = history[-1]
-                    constraints += f"\n--- ANCHOR: {d_key} ---\n{json.dumps(prev_content)}\n"
+            # [NATIVE_HOUND]
+            model_hound = GenerativeModel("gemini-2.0-flash-001")
+            search_tool = Tool.from_dict({"google_search": {}})
+            roles = ['visionary', 'commercial', 'realist']
+            team_results, bounty_bank = {}, []
+            eli_p = open(os.path.join(FRONTEND_ROOT, "Brain/EXO_BRAINS/GLOBAL/PROTOCOL_ELI.md")).read()
 
             for role in roles:
-                agent_id = f"strat_{target_dept}_{role.lower()}"
-                s_config, s_lens = get_agent_and_dept(agent_id)
-                prev_debate = json.dumps(team_results, indent=2)
-                await asyncio.sleep(1) 
+                s_c, _ = get_agent_and_dept(f'strat_the_big_idea_{role}')
+                h_res = model_hound.generate_content(f"Research 2026 data for: {active_manifesto['problem_statement']}", tools=[search_tool])
+                links = [f"[{c.web.title}]({c.web.uri})" for c in getattr(h_res.candidates[0].grounding_metadata, 'grounding_chunks', []) if c.web]
+                bounty_bank.extend(links)
+                
+                # [STR_CASTING]: Force content to string to avoid multi-part 500 errors
+                p_instr = f"{s_c['system_prompt']}\n\n[ELI]\n{eli_p}\n\nMISSION:\n{active_manifesto['problem_statement']}\n\nGROUND_TRUTH:\n{json.dumps(active_manifesto)}\n\nLINKS:\n{links}\n\nMANDATE: Cite using [Name](URL) format. No [RAW_DATA] tags."
+                p_res = s_c['llm'].invoke([SystemMessage(content=p_instr), HumanMessage(content="Analyze vision. Cite links.")])
+                team_results[role] = str(p_res.content) 
+                logger.warning(f"[SPECIALIST] {role} finished. Research Density: {len(team_results[role])} chars.")
 
-                if role != "synthesizer":
-                    instr = f"{s_config['system_prompt']}\n\n[MISSION MANIFESTO]\n{json.dumps(active_manifesto)}\n\nDNA: {ambition_dna}\n\nDEBATE SO FAR:\n{prev_debate}"
-                    messages = [SystemMessage(content=instr), HumanMessage(content=f"Perform a high-fidelity audit for {target_dept}. You MUST search Google for real-world metrics, competitors, and URLs from 2025/2026. Use the ELI Protocol.")]
-                    
-                    s_res = s_config['llm'].invoke(messages)
-                    team_results[role] = s_res.content
-                    
-                    # THE RECEIPT HARVEST
-                    meta = s_res.response_metadata.get("grounding_metadata", {})
-                    queries = meta.get("webSearchQueries") or meta.get("retrievalQueries", [])
-                    chunks = meta.get("groundingChunks", [])
-                    
-                    if queries: logger.warning(f"🔥 [SEARCH TRUTH] {role} googled: {queries}")
-                    if chunks:
-                        for chunk in chunks:
-                            if chunk.get("web"):
-                                url_data = f"[{chunk['web'].get('title')}]({chunk['web'].get('uri')})"
-                                if url_data not in bounty_bank: bounty_bank.append(url_data)
-                        logger.warning(f"📜 [RECEIPTS] {role} cited {len(chunks)} live sources.")
-                else:
-                    from app.agency.departments.product.schemas import StrategyPaperContent
-                    # INJECT THE BOUNTY BANK: Give the Synthesizer the actual URLs
-                    bounty_str = "\n".join(bounty_bank)
-                    final_instr = f"{s_config['system_prompt']}\n\n[MISSION MANIFESTO]\n{json.dumps(active_manifesto)}\n\n[VERIFIED SOURCES FOUND]\n{bounty_str}\n\nTECHNICAL DEBATE:\n{prev_debate}\n\nMANDATE: Author the {target_dept} brief. Use the Manifesto for facts and the VERIFIED SOURCES for evidence. You MUST fill every field. Include clickable markdown links from the sources."
-                    raw_paper = s_config['llm'].with_structured_output(StrategyPaperContent).invoke([SystemMessage(content=final_instr), HumanMessage(content="Finalize Brief.")])
-                    
-                    e_config, _ = get_agent_and_dept("global_editor")
-                    editor_instr = f"{e_config['system_prompt']}\n\n[MISSION MANIFESTO]\n{json.dumps(active_manifesto)}\n\n[VERIFIED SOURCES]\n{bounty_str}\n\nMANDATE: Polish the draft. Ensure it reflects the soul of the Manifesto. SACRED LAW: You must preserve at least 3 clickable markdown links from the VERIFIED SOURCES. If they are missing, add them to the Evidence section. Fill ALL fields."
-                    polished_paper = e_config['llm'].with_structured_output(StrategyPaperContent).invoke([SystemMessage(content=editor_instr), HumanMessage(content=json.dumps(raw_paper.dict()))])
-                    
-                    return {
-                        "user_message": f"The team has finished. I've adjudicated the tension and the Editor-in-Chief has polished the final brief for {target_dept.replace('_', ' ')}.",
-                        "patch": {"dept_id": target_dept, "content": polished_paper.dict()},
-                        "suggested_project_name": suggested_name
-                    }
+            e_c, _ = get_agent_and_dept('global_editor')
+            editor_instr = f"{e_c['system_prompt']}\n\nCLEANUP: Strip technical tags like [RAW_DATA] or [WEB_DATA]. Ensure links are markdown. DO NOT STRIP URLs.\n\nOFFICIAL_BRIEF: {active_manifesto['problem_statement']}\n\nVISIONARY: {team_results['visionary']}\n\nCOMMERCIAL: {team_results['commercial']}\n\nREALIST: {team_results['realist']}\n\nSOURCES: {' '.join(list(set(bounty_bank)))}"
+            strike_result = e_c['llm'].with_structured_output(BigIdeaContent).invoke([SystemMessage(content=editor_instr), HumanMessage(content='Assemble final paper.')])
 
+        # [PM_TURN]
+        agent_config, _ = get_agent_and_dept(specialist_id if is_interview else 'master_pm')
+        v_prose = get_manifesto_display({'mission_manifesto': active_manifesto})
+        
+        whisper = getattr(scribe_res, 'whisper', 'Focus on the discovery.')
+        law_msg = f"[LIBRARIAN HUD: {whisper}]\n[MISSION STATUS: {'GREEN' if physics_open else 'RED'}]\n\nMANDATE: If RED, address gaps: {missing}. NEVER say team is starting if status is RED."
+        
+        pm_res = agent_config['llm'].invoke([
+            SystemMessage(content=f"IDENTITY: {agent_config['system_prompt']}"),
+            SystemMessage(content=law_msg),
+            SystemMessage(content=f"CURRENT VISION STATE:\n{v_prose}")
+        ] + [(HumanMessage if turn.get('role') == 'user' else AIMessage)(content=turn.get('content', '...')) for turn in history_list] + [HumanMessage(content=prompt)])
 
-        return pm_decision
-
+        # [PERSISTENCE]: Final result save
+        v_man[REGISTRY.MANIFESTO] = active_manifesto
+        db.collection('cofounder_boards').document(project_id).set({'vibe_manifest': v_man}, merge=True)
+        return {'user_message': pm_res.content, 'suggested_project_name': None, 'manifesto': active_manifesto, 'hiring_authorized': bool(strike_result), 'patch': {'dept_id': 'the_big_idea', 'content': strike_result.dict()} if strike_result else None}
     except Exception as e:
-        logger.error(f"❌ AGENCY ERROR: {e}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f'❌ AGENCY ERROR: {e}'); import traceback; traceback.print_exc(); raise HTTPException(500, str(e))

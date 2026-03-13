@@ -1,2 +1,0 @@
-# Project Brain
-## Log Entries
